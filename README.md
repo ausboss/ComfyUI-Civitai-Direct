@@ -23,8 +23,8 @@ git clone https://github.com/ausboss/ComfyUI-Civitai-Direct
 
 **2. The userscript** — install [Tampermonkey](https://www.tampermonkey.net/), then click:
 
-- [civitai-direct.user.js](https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct.user.js) — download button on model pages
-- [civitai-direct-grid.user.js](https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct-grid.user.js) — ⚡ button on model cards (optional)
+- [civitai-direct.user.js](https://github.com/ausboss/ComfyUI-Civitai-Direct/raw/refs/heads/main/userscripts/civitai-direct.user.js) — download button on model pages
+- [civitai-direct-grid.user.js](https://github.com/ausboss/ComfyUI-Civitai-Direct/raw/refs/heads/main/userscripts/civitai-direct-grid.user.js) — ⚡ button on model cards (optional)
 
 That's it. With ComfyUI running, open any Civitai model page and the **⚡ Direct to Server** button appears next to the native download button.
 
