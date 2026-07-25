@@ -1,0 +1,13 @@
+# Your real API key, if you use the key-file option — never commit it
+civitai_api_key.txt
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Partial downloads
+*.part
+
+# OS
+.DS_Store
+Thumbs.db

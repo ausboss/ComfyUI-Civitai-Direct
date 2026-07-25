@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-civitai-direct"
+description = "One-click Civitai downloads straight into the right ComfyUI model folders - browse civitai.com normally, click the lightning button."
+version = "0.1.0"
+license = { file = "LICENSE" }
+
+keywords = ["comfyui", "civitai", "downloader", "models", "lora", "checkpoint", "userscript", "ausboss"]
+
+# Uses only what ComfyUI already ships (aiohttp).
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/ausboss/ComfyUI-Civitai-Direct"
+Issues = "https://github.com/ausboss/ComfyUI-Civitai-Direct/issues"
+
+[tool.comfy]
+PublisherId = "ausboss"
+DisplayName = "Civitai Direct (AusBoss)"
