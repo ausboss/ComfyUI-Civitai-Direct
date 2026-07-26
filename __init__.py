@@ -757,6 +757,48 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                          meta["model_version_id"], ascii(str(existing)))
                 return
 
+            # Second duplicate layer, for files this tool didn't download (no
+            # sidecar): same name on disk + SHA256 matching Civitai's record
+            # means the file is already here -- adopt it (backfilling the
+            # missing sidecars) instead of saving a "name (1)" copy. A name
+            # match with a DIFFERENT hash is a genuine collision (versions
+            # often reuse filenames) and still gets the unique suffix.
+            api_sha256 = ((file.get("hashes") or {}).get("SHA256") or "").strip().lower()
+            sha_cache: dict[str, str] = {}
+
+            async def same_bytes_already_here(path: Path) -> bool:
+                if not api_sha256 or not path.is_file():
+                    return False
+                sha = sha_cache.get(str(path))
+                if sha is None:
+                    job["state"] = "hashing_existing"
+                    sha = await calculate_sha256(path)
+                    sha_cache[str(path)] = sha
+                return sha.lower() == api_sha256
+
+            def adopt_existing(path: Path) -> None:
+                job.update(state="already_exists", path=str(path))
+                json_path = path.with_suffix(path.suffix + ".json")
+                if not json_path.exists():
+                    sidecar = build_sidecar_json(
+                        meta, {"model": model_json, "model_version": version_json},
+                        path, download_url, sha_cache.get(str(path)),
+                        path.stat().st_size, "already_exists",
+                    )
+                    write_json(json_path, sidecar)
+                    if SAVE_MARKDOWN_NOTES:
+                        write_markdown(path.with_suffix(path.suffix + ".md"), sidecar)
+                log.info("civitai-direct: identical file already on disk -> %s",
+                         ascii(str(path)))
+
+            expected_name = (
+                slug_aware_filename(meta) if is_wan_model(meta)
+                else safe_filename(file.get("name") or "") or slug_aware_filename(meta)
+            )
+            if await same_bytes_already_here(target_dir / expected_name):
+                adopt_existing(target_dir / expected_name)
+                return
+
             job["state"] = "downloading"
             key, key_source = get_api_key_with_source()
             key_desc = f"API key loaded from {key_source}" if key else "no API key configured"
@@ -792,7 +834,15 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                     filename = slug_aware_filename(meta)
 
                 target_dir.mkdir(parents=True, exist_ok=True)
-                dest = unique_destination_path(target_dir / filename)
+                dest = target_dir / filename
+                if dest.exists():
+                    # Served filename can differ from the API name, so this
+                    # can be a path the pre-download check never looked at.
+                    if await same_bytes_already_here(dest):
+                        adopt_existing(dest)
+                        return
+                    dest = unique_destination_path(dest)
+                job["state"] = "downloading"
                 dest_key = str(dest).lower()
                 if dest_key in _ACTIVE_DESTS:
                     dest_key = None

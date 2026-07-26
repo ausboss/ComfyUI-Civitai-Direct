@@ -52,8 +52,9 @@ point of this design.
   `{url, metadata}` and the grid userscript's `{model_id, model_version_id}`.
   Installed userscripts update lazily via @updateURL — old payloads keep
   arriving long after a release.
-- Job states (`resolving`, `downloading`, `hashing`, `writing_metadata`,
-  `done`, `already_exists`, `error`) are read by the userscripts' pollers.
+- Job states (`resolving`, `hashing_existing`, `downloading`, `hashing`,
+  `writing_metadata`, `done`, `already_exists`, `error`) are read by the
+  userscripts' pollers, which treat anything not terminal as in-progress.
 
 ## Conventions
 

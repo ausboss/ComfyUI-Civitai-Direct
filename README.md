@@ -52,7 +52,9 @@ The two files are re-read on every download — add the key and click ⚡ again,
 | Embedding | `embeddings/<base model>/` |
 | VAE / ControlNet / Upscaler / Text Encoder / Hypernetwork | matching folder, `<base model>/` subfolder |
 
-Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). Re-downloading a version you already have is detected and skipped. New files show up in ComfyUI's loaders immediately — no restart.
+Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). New files show up in ComfyUI's loaders immediately — no restart.
+
+**Duplicates are skipped, not copied.** Two checks run before any download: a version you already grabbed through this tool is recognized by its sidecar, and a same-named file from *anywhere else* (manual download, another tool) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten.
 
 If you run ComfyUI on a port other than 8188/8189, add it to `SERVER_PORTS` at the top of the userscript.
 
