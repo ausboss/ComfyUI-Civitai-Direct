@@ -10,4 +10,6 @@ All notable changes to ComfyUI-Civitai-Direct are documented here.
 - Added duplicate detection: re-requesting an already-downloaded version is skipped and reported as `already_exists`.
 - Added Wan-family slug-aware filenames.
 - Added the model-page and grid userscripts with ComfyUI port discovery (8188/8189) and live job polling — download progress and failures now show on the button.
-- Added API key support via `CIVITAI_API_KEY` or `civitai_api_key.txt` for gated / early-access models.
+- Added API key support via `CIVITAI_API_KEY`, a `.env` file, or `civitai_api_key.txt` — file keys are re-read per download (no restart), `/civitai/health` reports whether and where a key loaded, and downloads send the key both as `Authorization: Bearer` and `?token=`.
+- Added distinct error messages for login-required vs Early Access versions (an API key does not unlock Early Access), with token redaction on every stored or logged error.
+- Added the "Is this safe?" / "Does this send my data anywhere?" README sections.

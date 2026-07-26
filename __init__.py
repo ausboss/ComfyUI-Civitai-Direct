@@ -14,9 +14,12 @@ Routes (this package defines no graph nodes):
     GET  /civitai/status?id=N     state/progress of one download job
     GET  /civitai/jobs            every job this session
 
-The Civitai API key (needed for gated / early-access models) is read from
-the CIVITAI_API_KEY environment variable, or from a civitai_api_key.txt file
-next to this __init__.py (gitignored).
+The Civitai API key (needed for login-gated models) is read from, in order:
+the CIVITAI_API_KEY environment variable, a .env file next to this
+__init__.py (CIVITAI_API_KEY=...), or a civitai_api_key.txt file containing
+just the key. The files are re-read on every download, so adding a key does
+not require a ComfyUI restart. Note: an API key does NOT unlock Early Access
+versions -- those need the early-access purchase/subscription on the account.
 
 MIT License. Sibling project (standalone server + image/workflow tools):
 https://github.com/ausboss/easy-civitai-downloader
@@ -33,6 +36,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote, urlparse
 
 import aiohttp
 from aiohttp import web
@@ -54,17 +58,50 @@ CHUNK = 1 << 20  # 1 MiB per event-loop turn keeps the server responsive
 SAVE_MARKDOWN_NOTES = True
 SAVE_RAW_API_JSON = True
 
-_KEY_FILE = Path(__file__).resolve().parent / "civitai_api_key.txt"
+_NODE_DIR = Path(__file__).resolve().parent
+_ENV_FILE = _NODE_DIR / ".env"
+_KEY_FILE = _NODE_DIR / "civitai_api_key.txt"
 
 
-def get_api_key() -> str:
+def _key_from_env_file(path: Path) -> str:
+    """Parse CIVITAI_API_KEY out of a dotenv-style file, no dependencies."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            name, sep, value = line.partition("=")
+            if sep and name.strip() == "CIVITAI_API_KEY":
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def get_api_key_with_source() -> tuple[str, Optional[str]]:
+    """(key, where-it-came-from). Files are re-read on every call so a key
+    added while ComfyUI is running works on the next download."""
     key = os.getenv("CIVITAI_API_KEY", "").strip()
-    if not key and _KEY_FILE.is_file():
+    if key:
+        return key, "environment"
+    if _ENV_FILE.is_file():
+        key = _key_from_env_file(_ENV_FILE)
+        if key:
+            return key, ".env"
+    if _KEY_FILE.is_file():
         try:
             key = _KEY_FILE.read_text(encoding="utf-8").strip()
         except OSError:
             key = ""
-    return key
+        if key:
+            return key, "civitai_api_key.txt"
+    return "", None
+
+
+def get_api_key() -> str:
+    return get_api_key_with_source()[0]
 
 
 def auth_headers() -> dict[str, str]:
@@ -73,6 +110,22 @@ def auth_headers() -> dict[str, str]:
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+def add_token_to_url(url: str) -> str:
+    """Append ?token= for Civitai hosts. The download endpoint has
+    historically honored the query token more reliably than the
+    Authorization header, so downloads send both."""
+    key = get_api_key()
+    if not key:
+        return url
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return url
+    if not (host == "civitai.com" or host.endswith((".civitai.com", "civitai.red"))):
+        return url
+    return f"{url}{'&' if '?' in url else '?'}token={quote(key)}"
 
 
 # ============================================================
@@ -585,11 +638,13 @@ async def civitai_health(request):
             "controlnet", "upscale_models", "text_encoders", "hypernetworks",
         )
     }
+    key, source = get_api_key_with_source()
     return web.json_response({
         "status": "ok",
         "node": "ComfyUI-Civitai-Direct",
         "version": NODE_VERSION,
-        "has_civitai_api_key": bool(get_api_key()),
+        "has_civitai_api_key": bool(key),
+        "api_key_source": source,
         "dirs": dirs,
     })
 
@@ -703,18 +758,31 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                 return
 
             job["state"] = "downloading"
-            async with session.get(download_url) as resp:
-                if resp.status in (401, 403):
-                    raise RuntimeError(
-                        f"Civitai returned {resp.status} -- gated or early-access model; "
-                        "set an API key (CIVITAI_API_KEY or civitai_api_key.txt)."
+            key, key_source = get_api_key_with_source()
+            key_desc = f"API key loaded from {key_source}" if key else "no API key configured"
+            availability = version_json.get("availability")
+
+            def _gated_error(detail: str) -> RuntimeError:
+                if availability == "EarlyAccess":
+                    return RuntimeError(
+                        f"{detail} -- this version is in Early Access, which needs the "
+                        "early-access purchase/subscription on your Civitai account. "
+                        f"An API key alone does not unlock it ({key_desc}). "
+                        "It becomes downloadable when the early-access window ends."
                     )
+                return RuntimeError(
+                    f"{detail} -- the model requires a logged-in account "
+                    f"({key_desc}; see /civitai/health). If a key is loaded, check it "
+                    "at civitai.com/user/account and make sure your account can "
+                    "download this model in the browser."
+                )
+
+            async with session.get(add_token_to_url(download_url)) as resp:
+                if resp.status in (401, 403):
+                    raise _gated_error(f"Civitai returned {resp.status}")
                 resp.raise_for_status()
                 if "text/html" in resp.headers.get("Content-Type", ""):
-                    raise RuntimeError(
-                        "Civitai returned HTML instead of a model file -- "
-                        "the model is gated or your API key is invalid."
-                    )
+                    raise _gated_error("Civitai returned HTML instead of a model file")
 
                 served_name = None
                 if resp.content_disposition and resp.content_disposition.filename:
@@ -761,8 +829,11 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
             log.info("civitai-direct: saved model %s version %s -> %s",
                      meta["model_id"], meta["model_version_id"], ascii(str(dest)))
     except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
-        job.update(state="error", error=f"{type(exc).__name__}: {exc}")
-        log.warning("civitai-direct: job %s failed: %s", job_id, ascii(str(exc)))
+        # Redact before storing: aiohttp errors embed the request URL, which
+        # now carries ?token=, and the job record reaches the browser console.
+        message = redact_civitai_token(f"{type(exc).__name__}: {exc}")
+        job.update(state="error", error=message)
+        log.warning("civitai-direct: job %s failed: %s", job_id, ascii(message))
         if part is not None:
             try:
                 part.unlink(missing_ok=True)
