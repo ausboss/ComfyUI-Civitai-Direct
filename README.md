@@ -1,6 +1,6 @@
 <div align="center">
   <h1>ComfyUI-Civitai-Direct</h1>
-  <p><strong>Browse Civitai like normal. Click ⚡. Models land in the right ComfyUI folder.</strong></p>
+  <p><strong>Browse Civitai like normal. Click ⚡. Models and workflows land in the right ComfyUI folder.</strong></p>
   <p>
     <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
     <img src="https://img.shields.io/badge/release-0.1.0-00b4aa?style=flat-square" alt="Release 0.1.0">
@@ -8,7 +8,7 @@
   <p>Part of the <a href="https://github.com/ausboss/ComfyUI-AusBoss">AusBoss</a> node family.</p>
 </div>
 
-A ComfyUI custom node + a Tampermonkey userscript. No separate server, no Python setup, no config wizard — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/SDXL/`, `checkpoints/SD 1.5/`, `diffusion_models/Flux.1 Dev/`, ...) with `.json` + `.md` metadata sidecars, duplicate detection, and live progress on the button.
+A ComfyUI custom node + a Tampermonkey userscript. No separate server, no Python setup, no config wizard — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/SDXL/`, `checkpoints/SD 1.5/`, `diffusion_models/Flux.1 Dev/`, ...), while workflow ZIPs are safely extracted into ComfyUI's workflow library. Downloads include metadata sidecars, duplicate detection, and live progress on the button.
 
 <!-- TODO: GIF of the ⚡ button on a Civitai model page -->
 
@@ -51,6 +51,7 @@ The two files are re-read on every download — add the key and click ⚡ again,
 | LoRA / LyCORIS / DoRA | `loras/<base model>/` |
 | Embedding | `embeddings/<base model>/` |
 | VAE / ControlNet / Upscaler / Text Encoder / Hypernetwork | matching folder, `<base model>/` subfolder |
+| Workflow / Workflows | `user/<user>/workflows/civitai-direct/<base model>/<workflow>/` |
 
 Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). New files show up in ComfyUI's loaders immediately — no restart.
 
@@ -67,7 +68,7 @@ If you run ComfyUI on a port other than 8188/8189, add it to `SERVER_PORTS` at t
 
 ## Image & workflow tools
 
-Prompt/image downloading, ComfyUI-workflow extraction from gallery images, and workflow ZIP handling live in the sibling project [easy-civitai-downloader](https://github.com/ausboss/easy-civitai-downloader) (standalone server). This node stays focused on one thing: models into the right folders.
+Direct Civitai workflow assets are supported here: ZIPs are extracted, direct JSON/PNG artifacts are preserved, and metadata stays outside the workflow picker. Prompt/image downloading and workflow extraction from gallery images remain in the sibling project [easy-civitai-downloader](https://github.com/ausboss/easy-civitai-downloader) (standalone server).
 
 ## Development
 
@@ -83,7 +84,7 @@ Fair question for something that connects your browser to your filesystem. The r
 // @connect      127.0.0.1
 ```
 
-**Where can it write?** Only into folders ComfyUI itself reports via `folder_paths`, plus the `.json`/`.md` sidecars next to each model. Every path component built from Civitai data is sanitized first, so a hostile model name can't escape the models folder:
+**Where can it write?** Only into folders derived from ComfyUI's `folder_paths`: model folders, the requesting user's workflow library, and that user's Civitai Direct metadata folder. Every path component built from Civitai data is sanitized first, and workflow ZIP entries are checked before extraction so they cannot escape the destination folder:
 
 ```python
 value = re.sub(r"[<>:\"/\\|?*\x00-\x1F]", "_", value)   # safe_filename()

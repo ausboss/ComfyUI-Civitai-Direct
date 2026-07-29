@@ -33,6 +33,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -54,6 +56,15 @@ CIVITAI_MODEL_API = "https://civitai.com/api/v1/models/{model_id}"
 CIVITAI_VERSION_API = "https://civitai.com/api/v1/model-versions/{version_id}"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHUNK = 1 << 20  # 1 MiB per event-loop turn keeps the server responsive
+MAX_NESTED_ZIP_DEPTH = 8
+MAX_NESTED_ZIP_BYTES = 512 * 1024 * 1024
+
+# Civitai's nsfwLevel is a bitmask, not a scale: a model or version carries the
+# OR of every browsing level its images fall under, so 3 is "PG and PG13" and
+# 60 is "R, X, XXX and Blocked".
+NSFW_LEVELS: tuple[tuple[int, str], ...] = (
+    (1, "PG"), (2, "PG13"), (4, "R"), (8, "X"), (16, "XXX"), (32, "Blocked"),
+)
 
 SAVE_MARKDOWN_NOTES = True
 SAVE_RAW_API_JSON = True
@@ -165,6 +176,38 @@ def strip_html(value: str) -> str:
     value = html.unescape(value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
+
+
+def decode_nsfw_level(value: Any) -> tuple[list[str], Optional[str]]:
+    """(every browsing level in the bitmask, the highest one)."""
+    try:
+        bits = int(value)
+    except (TypeError, ValueError):
+        return [], None
+    names = [name for bit, name in NSFW_LEVELS if bits & bit]
+    return names, (names[-1] if names else None)
+
+
+def parse_permission_list(value: Any) -> list[str]:
+    """allowCommercialUse comes back as a JSON list on some endpoints and as a
+    raw Postgres array string ("{Image,RentCivit,Rent}") on others."""
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    text = str(value or "").strip()
+    if text.startswith("{") and text.endswith("}"):
+        text = text[1:-1]
+    return [part.strip().strip('"') for part in text.split(",") if part.strip()]
+
+
+def format_size(size_bytes: Optional[float]) -> str:
+    if not size_bytes:
+        return ""
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
 
 
 def normalize_model_type(value: Optional[str]) -> str:
@@ -334,6 +377,128 @@ def unique_destination_path(path: Path) -> Path:
     return candidate
 
 
+def comfyui_user_dir(user_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", user_id or ""):
+        raise RuntimeError("invalid ComfyUI user id")
+
+    get_public_dir = getattr(folder_paths, "get_public_user_directory", None)
+    if callable(get_public_dir):
+        user_dir = get_public_dir(user_id)
+        if user_dir is None:
+            raise RuntimeError("invalid ComfyUI user directory")
+    else:
+        user_dir = Path(folder_paths.get_user_directory()) / user_id
+
+    return Path(user_dir)
+
+
+def workflow_target_dir(user_id: str, base_model: str) -> Path:
+    """ComfyUI workflow-library destination for the requesting user."""
+    return (
+        comfyui_user_dir(user_id)
+        / "workflows"
+        / "civitai-direct"
+        / safe_folder(base_model, "UnknownBaseModel")
+    )
+
+
+def workflow_metadata_dir(user_id: str, base_model: str) -> Path:
+    return (
+        comfyui_user_dir(user_id)
+        / ".civitai-direct"
+        / "workflow-metadata"
+        / safe_folder(base_model, "UnknownBaseModel")
+    )
+
+
+def workflow_artifact_path(download_path: Path) -> Path:
+    if download_path.suffix.lower() == ".zip":
+        return download_path.parent / safe_folder(download_path.stem, "workflow")
+    return download_path
+
+
+def workflow_sidecar_json_path(metadata_dir: Path, artifact_path: Path) -> Path:
+    stem = artifact_path.stem if artifact_path.suffix else artifact_path.name
+    return metadata_dir / f"{safe_filename(stem, 'workflow')}.civitai.json"
+
+
+def workflow_sidecar_markdown_path(metadata_dir: Path, artifact_path: Path) -> Path:
+    stem = artifact_path.stem if artifact_path.suffix else artifact_path.name
+    return metadata_dir / f"{safe_filename(stem, 'workflow')}.civitai.md"
+
+
+def unique_workflow_destination(download_path: Path) -> tuple[Path, Path]:
+    candidate = download_path
+    index = 1
+    while True:
+        artifact = workflow_artifact_path(candidate)
+        part = candidate.with_suffix(candidate.suffix + ".part")
+        artifact_part = artifact.with_name(artifact.name + ".part")
+        if (
+            not candidate.exists()
+            and not artifact.exists()
+            and not part.exists()
+            and not artifact_part.exists()
+        ):
+            return candidate, artifact
+        candidate = download_path.with_name(
+            f"{download_path.stem} ({index}){download_path.suffix}"
+        )
+        index += 1
+
+
+def _safe_archive_members(
+    archive: zipfile.ZipFile,
+    extract_dir: Path,
+) -> list[zipfile.ZipInfo]:
+    members = archive.infolist()
+    resolved_extract_dir = extract_dir.resolve()
+    for member in members:
+        member_path = (extract_dir / member.filename).resolve()
+        if member_path != resolved_extract_dir and resolved_extract_dir not in member_path.parents:
+            raise RuntimeError(f"unsafe ZIP entry path: {member.filename}")
+    return members
+
+
+def _hoist_single_subdirectory(extract_dir: Path) -> None:
+    children = list(extract_dir.iterdir())
+    if len(children) != 1 or not children[0].is_dir():
+        return
+    inner_dir = children[0]
+    for item in inner_dir.iterdir():
+        shutil.move(str(item), str(extract_dir / item.name))
+    inner_dir.rmdir()
+
+
+def _extract_workflow_zip(zip_path: Path, extract_dir: Path, depth: int = 0) -> None:
+    if depth > MAX_NESTED_ZIP_DEPTH:
+        raise RuntimeError("nested ZIP depth limit exceeded")
+
+    with zipfile.ZipFile(zip_path) as archive:
+        _safe_archive_members(archive, extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        archive.extractall(extract_dir)
+
+    nested_zips = sorted(
+        (
+            path
+            for path in extract_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".zip"
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for nested_zip in nested_zips:
+        if nested_zip.stat().st_size > MAX_NESTED_ZIP_BYTES:
+            raise RuntimeError(f"nested ZIP is too large to extract safely: {nested_zip.name}")
+        nested_extract_dir = nested_zip.parent / safe_folder(nested_zip.stem, "workflow")
+        _extract_workflow_zip(nested_zip, nested_extract_dir, depth + 1)
+        nested_zip.unlink()
+        _hoist_single_subdirectory(nested_extract_dir)
+
+    _hoist_single_subdirectory(extract_dir)
+
+
 # ============================================================
 # URL parsing
 # ============================================================
@@ -380,6 +545,73 @@ def pick_primary_model_file(version_json: dict[str, Any]) -> Optional[dict[str, 
     return primary or (files[0] if files else None)
 
 
+def build_classification(
+    model_json: dict[str, Any],
+    version_json: dict[str, Any],
+    file: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Sort/filter/identify signals, flattened out of the two API payloads.
+
+    The point is that a librarian script can decide where a file belongs --
+    or that it should never have been downloaded -- without re-querying
+    Civitai or digging through api_raw.
+    """
+    file = file or {}
+    file_meta = file.get("metadata") or {}
+
+    version_levels, version_top = decode_nsfw_level(version_json.get("nsfwLevel"))
+    model_levels, model_top = decode_nsfw_level(model_json.get("nsfwLevel"))
+
+    return {
+        # The uploader's own NSFW checkbox. Unreliable on its own -- plenty of
+        # models sit at nsfw=false with XXX images -- so sort on the levels.
+        "nsfw": model_json.get("nsfw"),
+        # Rates THIS version, i.e. the file being saved.
+        "nsfw_level": version_json.get("nsfwLevel"),
+        "nsfw_levels": version_levels,
+        "nsfw_level_top": version_top,
+        # Union across every version of the model, so it reads higher than the
+        # downloaded file often deserves. Useful as a "what is this creator
+        # posting" signal, not as the file's own rating.
+        "model_nsfw_level": model_json.get("nsfwLevel"),
+        "model_nsfw_levels": model_levels,
+        "model_nsfw_level_top": model_top,
+        "sfw_only": model_json.get("sfwOnly"),
+        "minor": model_json.get("minor"),
+        "poi": model_json.get("poi"),  # trained on a real, identifiable person
+        "availability": version_json.get("availability") or model_json.get("availability"),
+        "status": version_json.get("status"),
+        "supports_generation": model_json.get("supportsGeneration"),
+        "usage_control": version_json.get("usageControl"),
+        "upload_type": version_json.get("uploadType"),
+        "base_model_type": version_json.get("baseModelType"),
+        "model_base_models": model_json.get("baseModels") or [],
+        "version_index": version_json.get("index"),  # 0 is the newest version
+        "version_stats": version_json.get("stats") or {},
+        "dates": {
+            "created": version_json.get("createdAt"),
+            "published": version_json.get("publishedAt"),
+            "updated": version_json.get("updatedAt"),
+        },
+        "license": {
+            "allow_no_credit": model_json.get("allowNoCredit"),
+            "allow_commercial_use": parse_permission_list(model_json.get("allowCommercialUse")),
+            "allow_derivatives": model_json.get("allowDerivatives"),
+            "allow_different_license": model_json.get("allowDifferentLicense"),
+        },
+        "file": {
+            "name": file.get("name"),
+            "size_kb": file.get("sizeKB"),
+            "format": file_meta.get("format"),      # SafeTensor / PickleTensor
+            "precision": file_meta.get("fp"),       # fp16 / bf16 / fp32
+            "size_type": file_meta.get("size"),     # full / pruned
+            "pickle_scan": file.get("pickleScanResult"),
+            "virus_scan": file.get("virusScanResult"),
+            "scanned_at": file.get("scannedAt"),
+        },
+    }
+
+
 async def fetch_json(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
     async with session.get(url) as resp:
         if resp.status in (401, 403):
@@ -398,9 +630,10 @@ async def resolve_model(
     slug: Optional[str],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Return (model_json, version_json, meta) from whatever ids we have."""
+    detail_json: Optional[dict[str, Any]] = None
     if model_id is None and version_id is not None:
-        version_json = await fetch_json(session, CIVITAI_VERSION_API.format(version_id=version_id))
-        model_id = version_json.get("modelId")
+        detail_json = await fetch_json(session, CIVITAI_VERSION_API.format(version_id=version_id))
+        model_id = detail_json.get("modelId")
         if model_id is None:
             raise RuntimeError(f"model-versions/{version_id} has no modelId")
 
@@ -418,6 +651,23 @@ async def resolve_model(
             raise RuntimeError(f"version {version_id} not found on model {model_id}")
     else:
         version_json = versions[0]
+
+    # The model endpoint's embedded version objects drop fields only the
+    # dedicated version endpoint carries (air, usageControl, uploadType,
+    # updatedAt, trainingDetails), so fetch that too. The embedded copy wins
+    # every shared key -- availability, index and covered exist nowhere else,
+    # and availability is what drives the Early Access error message.
+    if detail_json is None or detail_json.get("id") != version_json.get("id"):
+        detail_json = None
+        try:
+            detail_json = await fetch_json(
+                session, CIVITAI_VERSION_API.format(version_id=version_json.get("id"))
+            )
+        except Exception as exc:  # noqa: BLE001 -- extra detail, never a blocker
+            log.info("civitai-direct: version %s detail unavailable (%s)",
+                     version_json.get("id"), ascii(redact_civitai_token(exc)))
+    if detail_json:
+        version_json = {**detail_json, **version_json}
 
     trained_words = version_json.get("trainedWords") or []
     description_html = model_json.get("description")
@@ -449,6 +699,8 @@ async def resolve_model(
         "description_html": description_html,
         "description_text": strip_html(description_html or ""),
         "stats": model_json.get("stats") or {},
+        "api_hashes": (file or {}).get("hashes") or {},
+        "classification": build_classification(model_json, version_json, file),
     }
     return model_json, version_json, meta
 
@@ -469,9 +721,11 @@ def build_sidecar_json(
     file_sha256: Optional[str],
     file_size: Optional[int],
     status: str,
+    json_file_path: Optional[Path] = None,
+    markdown_file_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    json_file_path = save_path.with_suffix(save_path.suffix + ".json")
-    markdown_file_path = save_path.with_suffix(save_path.suffix + ".md")
+    json_file_path = json_file_path or save_path.with_suffix(save_path.suffix + ".json")
+    markdown_file_path = markdown_file_path or save_path.with_suffix(save_path.suffix + ".md")
 
     return {
         "schema": SIDECAR_SCHEMA,
@@ -517,11 +771,17 @@ def build_sidecar_json(
         "classification": {
             "tags": meta.get("tags") or [],
             "stats": meta.get("stats") or {},
+            # Additive only: tags and stats keep their names and position, the
+            # rest of the sort/filter signals merge in behind them.
+            **(meta.get("classification") or {}),
         },
         "hashes": {
             "page_hash_type": meta.get("hash_type"),
             "page_hash_value": meta.get("hash_value"),
             "downloaded_sha256": file_sha256,
+            # AutoV2 is what A1111 shows, AutoV3 what Civitai's UI shows --
+            # both let other tools match this file without rehashing it.
+            "api_hashes": meta.get("api_hashes") or {},
         },
         "api_raw": api_raw if SAVE_RAW_API_JSON else None,
     }
@@ -530,6 +790,57 @@ def build_sidecar_json(
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def classification_lines(payload: dict[str, Any]) -> list[str]:
+    """The '## Classification' block: stable `- **Key:** value` bullets, so the
+    note greps as easily as the JSON sidecar parses."""
+    cls = payload.get("classification") or {}
+    lic = cls.get("license") or {}
+    fil = cls.get("file") or {}
+    stats = cls.get("stats") or {}
+    version_stats = cls.get("version_stats") or {}
+    tags = cls.get("tags") or []
+    no_credit = lic.get("allow_no_credit")
+
+    def yes_no(value: Any) -> str:
+        return "" if value is None else ("Yes" if value else "No")
+
+    def rating(level: Any, names: list[str]) -> str:
+        text = ", ".join(names) or "unrated"
+        return f"{text} (level {level})" if level is not None else text
+
+    file_format = " / ".join(
+        filter(None, [fil.get("format"), fil.get("precision"), fil.get("size_type")])
+    )
+
+    return [
+        "",
+        "## Classification",
+        "",
+        f"- **Rating:** {rating(cls.get('nsfw_level'), cls.get('nsfw_levels') or [])}",
+        f"- **Rating across all versions:** "
+        f"{rating(cls.get('model_nsfw_level'), cls.get('model_nsfw_levels') or [])}",
+        f"- **NSFW flag:** {yes_no(cls.get('nsfw'))}",
+        f"- **Real person (PoI):** {yes_no(cls.get('poi'))}",
+        f"- **Depicts a minor:** {yes_no(cls.get('minor'))}",
+        f"- **SFW only:** {yes_no(cls.get('sfw_only'))}",
+        f"- **Tags:** {', '.join(f'`{tag}`' for tag in tags) or 'None captured'}",
+        f"- **Availability:** {cls.get('availability') or ''}",
+        f"- **Usage control:** {cls.get('usage_control') or ''}",
+        f"- **Base model type:** {cls.get('base_model_type') or ''}",
+        f"- **Upload type:** {cls.get('upload_type') or ''}",
+        f"- **Format:** {file_format}",
+        f"- **API file name:** `{fil.get('name') or ''}`",
+        f"- **Size:** {format_size((fil.get('size_kb') or 0) * 1024)}",
+        f"- **Scans:** pickle {fil.get('pickle_scan') or '?'}, virus {fil.get('virus_scan') or '?'}",
+        f"- **Downloads:** {stats.get('downloadCount', '')} "
+        f"(this version: {version_stats.get('downloadCount', '')})",
+        f"- **Thumbs:** {stats.get('thumbsUpCount', '')} up / {stats.get('thumbsDownCount', '')} down",
+        f"- **Commercial use:** {', '.join(lic.get('allow_commercial_use') or []) or 'None'}",
+        f"- **Derivatives allowed:** {yes_no(lic.get('allow_derivatives'))}",
+        f"- **Attribution required:** {'' if no_credit is None else yes_no(not no_credit)}",
+    ]
 
 
 def write_markdown(path: Path, payload: dict[str, Any]) -> None:
@@ -563,6 +874,8 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         lines.extend(f"- `{word}`" for word in trigger_words)
     else:
         lines.append("- None captured")
+
+    lines.extend(classification_lines(payload))
 
     lines.extend([
         "",
@@ -691,6 +1004,14 @@ async def _handle_download(request):
             status=400,
         )
 
+    user_id = "default"
+    user_manager = getattr(PromptServer.instance, "user_manager", None)
+    if user_manager is not None:
+        try:
+            user_id = user_manager.get_request_user_id(request)
+        except KeyError:
+            return web.json_response({"error": "unknown ComfyUI user"}, status=403)
+
     job_id = next(_job_ids)
     JOBS[job_id] = {
         "state": "resolving",
@@ -704,8 +1025,9 @@ async def _handle_download(request):
         "bytes_total": None,
         "path": None,
         "error": None,
+        "user_id": user_id,
     }
-    asyncio.create_task(_run_download(job_id, model_id, version_id, slug))
+    asyncio.create_task(_run_download(job_id, model_id, version_id, slug, user_id))
     return web.json_response({"status": "queued", "job_id": job_id})
 
 
@@ -715,9 +1037,10 @@ routes.post("/civitai/download")(_handle_download)
 routes.post("/civitai/download-by-id")(_handle_download)
 
 
-async def _run_download(job_id: int, model_id, version_id, slug) -> None:
+async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -> None:
     job = JOBS[job_id]
     part: Optional[Path] = None
+    extraction_part: Optional[Path] = None
     dest_key: Optional[str] = None
     try:
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
@@ -733,10 +1056,7 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
             )
 
             model_type = normalize_model_type(meta["type"])
-            if model_type == "Workflow":
-                raise RuntimeError(
-                    "Workflow downloads aren't supported yet -- use easy-civitai-downloader for those."
-                )
+            workflow_download = model_type == "Workflow"
 
             file = pick_primary_model_file(version_json)
             if file is None:
@@ -748,9 +1068,21 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
             name_haystack = " ".join(
                 filter(None, [meta.get("model_name"), meta.get("version_name"), file.get("name")])
             )
-            target_dir = choose_target_dir(model_type, meta["base_model"], name_haystack)
+            target_dir = (
+                workflow_target_dir(user_id, meta["base_model"])
+                if workflow_download
+                else choose_target_dir(model_type, meta["base_model"], name_haystack)
+            )
+            metadata_dir = (
+                workflow_metadata_dir(user_id, meta["base_model"])
+                if workflow_download
+                else None
+            )
 
-            existing = matching_downloaded_version_sidecar(target_dir, meta)
+            existing = matching_downloaded_version_sidecar(metadata_dir or target_dir, meta)
+            if not existing and workflow_download:
+                # Compatibility with the sibling downloader's older layout.
+                existing = matching_downloaded_version_sidecar(target_dir, meta)
             if existing:
                 job.update(state="already_exists", path=str(existing))
                 log.info("civitai-direct: version %s already at %s",
@@ -792,10 +1124,10 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                          ascii(str(path)))
 
             expected_name = (
-                slug_aware_filename(meta) if is_wan_model(meta)
+                slug_aware_filename(meta) if not workflow_download and is_wan_model(meta)
                 else safe_filename(file.get("name") or "") or slug_aware_filename(meta)
             )
-            if await same_bytes_already_here(target_dir / expected_name):
+            if not workflow_download and await same_bytes_already_here(target_dir / expected_name):
                 adopt_existing(target_dir / expected_name)
                 return
 
@@ -830,12 +1162,16 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                 if resp.content_disposition and resp.content_disposition.filename:
                     served_name = safe_filename(resp.content_disposition.filename)
                 filename = served_name or safe_filename(file.get("name") or "") or slug_aware_filename(meta)
-                if is_wan_model(meta):
+                if not workflow_download and is_wan_model(meta):
                     filename = slug_aware_filename(meta)
 
                 target_dir.mkdir(parents=True, exist_ok=True)
-                dest = target_dir / filename
-                if dest.exists():
+                workflow_artifact: Optional[Path] = None
+                if workflow_download:
+                    dest, workflow_artifact = unique_workflow_destination(target_dir / filename)
+                else:
+                    dest = target_dir / filename
+                if not workflow_download and dest.exists():
                     # Served filename can differ from the API name, so this
                     # can be a path the pre-download check never looked at.
                     if await same_bytes_already_here(dest):
@@ -843,14 +1179,14 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
                         return
                     dest = unique_destination_path(dest)
                 job["state"] = "downloading"
-                dest_key = str(dest).lower()
+                dest_key = str(workflow_artifact or dest).lower()
                 if dest_key in _ACTIVE_DESTS:
                     dest_key = None
                     raise RuntimeError("this file is already being downloaded")
                 _ACTIVE_DESTS.add(dest_key)
 
                 part = dest.with_suffix(dest.suffix + ".part")
-                job["path"] = str(dest)
+                job["path"] = str(workflow_artifact or dest)
                 total = resp.headers.get("Content-Length")
                 job["bytes_total"] = int(total) if total else None
 
@@ -866,18 +1202,43 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
             file_sha256 = await calculate_sha256(dest)
             file_size = dest.stat().st_size
 
+            artifact_path = dest
+            if workflow_download and dest.suffix.lower() == ".zip":
+                if workflow_artifact is None:
+                    raise RuntimeError("could not determine workflow extraction directory")
+                job["state"] = "extracting"
+                extraction_part = workflow_artifact.with_name(workflow_artifact.name + ".part")
+                await asyncio.to_thread(_extract_workflow_zip, dest, extraction_part)
+                extraction_part.replace(workflow_artifact)
+                extraction_part = None
+                dest.unlink()
+                artifact_path = workflow_artifact
+                job["path"] = str(artifact_path)
+
             job["state"] = "writing_metadata"
             api_raw = {"model": model_json, "model_version": version_json}
-            sidecar = build_sidecar_json(
-                meta, api_raw, dest, download_url, file_sha256, file_size, "downloaded"
+            json_path = (
+                workflow_sidecar_json_path(metadata_dir, artifact_path)
+                if workflow_download and metadata_dir is not None
+                else dest.with_suffix(dest.suffix + ".json")
             )
-            write_json(dest.with_suffix(dest.suffix + ".json"), sidecar)
+            markdown_path = (
+                workflow_sidecar_markdown_path(metadata_dir, artifact_path)
+                if workflow_download and metadata_dir is not None
+                else dest.with_suffix(dest.suffix + ".md")
+            )
+            sidecar = build_sidecar_json(
+                meta, api_raw, artifact_path, download_url, file_sha256, file_size, "downloaded",
+                json_file_path=json_path,
+                markdown_file_path=markdown_path,
+            )
+            write_json(json_path, sidecar)
             if SAVE_MARKDOWN_NOTES:
-                write_markdown(dest.with_suffix(dest.suffix + ".md"), sidecar)
+                write_markdown(markdown_path, sidecar)
 
             job["state"] = "done"
             log.info("civitai-direct: saved model %s version %s -> %s",
-                     meta["model_id"], meta["model_version_id"], ascii(str(dest)))
+                     meta["model_id"], meta["model_version_id"], ascii(str(artifact_path)))
     except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
         # Redact before storing: aiohttp errors embed the request URL, which
         # now carries ?token=, and the job record reaches the browser console.
@@ -887,6 +1248,11 @@ async def _run_download(job_id: int, model_id, version_id, slug) -> None:
         if part is not None:
             try:
                 part.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if extraction_part is not None:
+            try:
+                shutil.rmtree(extraction_part)
             except OSError:
                 pass
     finally:
