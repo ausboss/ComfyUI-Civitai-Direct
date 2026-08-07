@@ -11,14 +11,21 @@ Routes (this package defines no graph nodes):
 
     GET  /civitai/health          server info + resolved model dirs
     POST /civitai/download        {"url": ...} or {"model_id": ..., "model_version_id": ...}
+    POST /civitai/download-image  {"image_id": ...} and/or {"image_url": ..., "page_url": ...}
     GET  /civitai/status?id=N     state/progress of one download job
     GET  /civitai/jobs            every job this session
 
-The Civitai API key (needed for login-gated models) is read from, in order:
-the CIVITAI_API_KEY environment variable, a .env file next to this
-__init__.py (CIVITAI_API_KEY=...), or a civitai_api_key.txt file containing
-just the key. The files are re-read on every download, so adding a key does
-not require a ComfyUI restart. Note: an API key does NOT unlock Early Access
+Settings come from the environment or a .env file next to this __init__.py
+(NAME=value lines), re-read on every download so changes apply without a
+ComfyUI restart:
+
+    CIVITAI_API_KEY       API key for login-gated models (also accepted as a
+                          bare civitai_api_key.txt file containing just the key)
+    CIVITAI_IMAGE_DIR     where /civitai/download-image saves images.
+                          Default: <your Pictures folder>/Civitai
+    CIVITAI_WORKFLOW_DIR  where Workflow-type models are saved.
+                          Default: ComfyUI's own workflow library
+                          (user/<user>/workflows/civitai-direct/<base model>) Note: an API key does NOT unlock Early Access
 versions -- those need the early-access purchase/subscription on the account.
 
 MIT License. Sibling project (standalone server + image/workflow tools):
@@ -74,8 +81,8 @@ _ENV_FILE = _NODE_DIR / ".env"
 _KEY_FILE = _NODE_DIR / "civitai_api_key.txt"
 
 
-def _key_from_env_file(path: Path) -> str:
-    """Parse CIVITAI_API_KEY out of a dotenv-style file, no dependencies."""
+def _env_file_value(path: Path, name: str) -> str:
+    """Parse one NAME out of a dotenv-style file, no dependencies."""
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -83,11 +90,22 @@ def _key_from_env_file(path: Path) -> str:
                 continue
             if line.startswith("export "):
                 line = line[len("export "):].lstrip()
-            name, sep, value = line.partition("=")
-            if sep and name.strip() == "CIVITAI_API_KEY":
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == name:
                 return value.strip().strip('"').strip("'")
     except OSError:
         pass
+    return ""
+
+
+def get_setting(name: str) -> str:
+    """Environment variable first, then the .env file next to this file.
+    Re-read on every call so edits apply without a ComfyUI restart."""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    if _ENV_FILE.is_file():
+        return _env_file_value(_ENV_FILE, name)
     return ""
 
 
@@ -98,7 +116,7 @@ def get_api_key_with_source() -> tuple[str, Optional[str]]:
     if key:
         return key, "environment"
     if _ENV_FILE.is_file():
-        key = _key_from_env_file(_ENV_FILE)
+        key = _env_file_value(_ENV_FILE, "CIVITAI_API_KEY")
         if key:
             return key, ".env"
     if _KEY_FILE.is_file():
@@ -392,19 +410,86 @@ def comfyui_user_dir(user_id: str) -> Path:
     return Path(user_dir)
 
 
+def _windows_pictures_dir() -> Optional[Path]:
+    """Ask the shell for the real Pictures folder -- users relocate it
+    (OneDrive does this by default), so %USERPROFILE%\\Pictures is a guess."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # FOLDERID_Pictures {33E28130-4E1E-4676-835A-98395C3BC3BB}
+        folder_id = _GUID(
+            0x33E28130, 0x4E1E, 0x4676,
+            (ctypes.c_ubyte * 8)(0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB),
+        )
+        out = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id), 0, None, ctypes.byref(out)
+        ) != 0:
+            return None
+        path = Path(out.value) if out.value else None
+        ctypes.windll.ole32.CoTaskMemFree(out)
+        return path
+    except Exception:
+        return None
+
+
+def _xdg_pictures_dir(home: Path) -> Optional[Path]:
+    config = Path(os.getenv("XDG_CONFIG_HOME") or home / ".config") / "user-dirs.dirs"
+    try:
+        for line in config.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("XDG_PICTURES_DIR"):
+                value = line.partition("=")[2].strip().strip('"')
+                value = value.replace("$HOME", str(home))
+                if value:
+                    return Path(value)
+    except OSError:
+        pass
+    return None
+
+
+def default_pictures_dir() -> Path:
+    home = Path.home()
+    if os.name == "nt":
+        return _windows_pictures_dir() or home / "Pictures"
+    return _xdg_pictures_dir(home) or home / "Pictures"
+
+
+def images_target_dir() -> Path:
+    override = get_setting("CIVITAI_IMAGE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return default_pictures_dir() / "Civitai"
+
+
 def workflow_target_dir(user_id: str, base_model: str) -> Path:
-    """ComfyUI workflow-library destination for the requesting user."""
-    return (
-        comfyui_user_dir(user_id)
-        / "workflows"
-        / "civitai-direct"
-        / safe_folder(base_model, "UnknownBaseModel")
+    """Workflow destination: CIVITAI_WORKFLOW_DIR if set, else the requesting
+    user's ComfyUI workflow library."""
+    override = get_setting("CIVITAI_WORKFLOW_DIR")
+    base = (
+        Path(override).expanduser()
+        if override
+        else comfyui_user_dir(user_id) / "workflows" / "civitai-direct"
     )
+    return base / safe_folder(base_model, "UnknownBaseModel")
 
 
 def workflow_metadata_dir(user_id: str, base_model: str) -> Path:
+    override = get_setting("CIVITAI_WORKFLOW_DIR")
+    base = (
+        Path(override).expanduser()
+        if override
+        else comfyui_user_dir(user_id)
+    )
     return (
-        comfyui_user_dir(user_id)
+        base
         / ".civitai-direct"
         / "workflow-metadata"
         / safe_folder(base_model, "UnknownBaseModel")
@@ -934,6 +1019,284 @@ async def calculate_sha256(path: Path) -> str:
 
 
 # ============================================================
+# Images (ported from easy-civitai-downloader; sidecar schema shared)
+# ============================================================
+
+IMAGE_SIDECAR_SCHEMA = "ausboss-civitai-image-sidecar-v1"
+CIVITAI_IMAGE_API = "https://civitai.com/api/v1/images"
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
+
+
+def extension_from_url(url: str, fallback: str = ".jpg") -> str:
+    try:
+        suffix = Path(urlparse(url).path).suffix.lower()
+        if suffix in _IMAGE_EXTENSIONS:
+            return suffix
+    except Exception:
+        pass
+    return fallback
+
+
+def original_image_url(url: str) -> str:
+    """Rewrite an image.civitai.com delivery URL to fetch the original upload.
+
+    Civitai serves width-optimized renders (.../width=1152/name.jpeg).
+    Replacing the transform segment with original=true returns the unmodified
+    file, which for PNGs keeps embedded generation/ComfyUI metadata.
+    """
+    try:
+        parsed = urlparse(url)
+        if "image.civitai.com" not in parsed.netloc:
+            return url
+
+        parts = parsed.path.split("/")
+        if len(parts) >= 2 and "=" in parts[-2]:
+            parts[-2] = "original=true"
+        elif len(parts) >= 2:
+            parts.insert(-1, "original=true")
+        else:
+            return url
+
+        return parsed._replace(path="/".join(parts)).geturl()
+    except Exception:
+        return url
+
+
+def extension_from_content_type(content_type: str, fallback: str = ".jpg") -> str:
+    content_type = (content_type or "").lower()
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    if "gif" in content_type:
+        return ".gif"
+    if "avif" in content_type:
+        return ".avif"
+    if "jpeg" in content_type or "jpg" in content_type:
+        return ".jpg"
+    return fallback
+
+
+def extract_png_text_chunks(path: Path) -> dict[str, str]:
+    """Read tEXt/zTXt/iTXt chunks from a PNG (ComfyUI stores its prompt and
+    workflow there; A1111 stores 'parameters'). Returns {keyword: text}."""
+    import struct
+    import zlib
+
+    result: dict[str, str] = {}
+    try:
+        with path.open("rb") as f:
+            if f.read(8) != b"\x89PNG\r\n\x1a\n":
+                return {}
+
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                length, chunk_type = struct.unpack(">I4s", header)
+                if chunk_type in {b"tEXt", b"zTXt", b"iTXt"} and length < 64 * 1024 * 1024:
+                    data = f.read(length)
+                    f.seek(4, 1)  # skip CRC
+                    try:
+                        if chunk_type == b"tEXt":
+                            key, _, value = data.partition(b"\x00")
+                            result[key.decode("latin-1")] = value.decode("latin-1")
+                        elif chunk_type == b"zTXt":
+                            key, _, rest = data.partition(b"\x00")
+                            result[key.decode("latin-1")] = zlib.decompress(rest[1:]).decode("latin-1")
+                        else:  # iTXt
+                            key, _, rest = data.partition(b"\x00")
+                            compressed = rest[0:1] == b"\x01"
+                            rest = rest[2:]
+                            _, _, rest = rest.partition(b"\x00")  # language tag
+                            _, _, text = rest.partition(b"\x00")  # translated keyword
+                            if compressed:
+                                text = zlib.decompress(text)
+                            result[key.decode("latin-1")] = text.decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+                else:
+                    f.seek(length + 4, 1)
+                if chunk_type == b"IEND":
+                    break
+    except Exception as exc:
+        log.warning("civitai-direct: failed to read PNG text chunks from %s: %s",
+                    ascii(path.name), ascii(exc))
+
+    return result
+
+
+def _parse_json_maybe(value: Optional[str]) -> Any:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def image_generation_meta(data: dict[str, Any]) -> dict[str, Any]:
+    gen = data.get("generation_data") or {}
+    meta = gen.get("meta") if isinstance(gen, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def comfy_workflow_from_request(data: dict[str, Any]) -> Any:
+    """ComfyUI graph from the userscript's generation data, if present.
+
+    Civitai stores it as {"prompt": ..., "workflow": ...}; the workflow half
+    is what ComfyUI loads/pastes. Returns a dict/list or None."""
+    comfy = image_generation_meta(data).get("comfy")
+    if isinstance(comfy, str):
+        comfy = _parse_json_maybe(comfy)
+    if not isinstance(comfy, dict):
+        return None
+
+    workflow = comfy.get("workflow")
+    if isinstance(workflow, (dict, list)) and workflow:
+        return workflow
+    return comfy
+
+
+def build_image_sidecar(
+    data: dict[str, Any],
+    image_id: Optional[int],
+    image_url: str,
+    prompt: Optional[str],
+    api_image: Optional[dict[str, Any]],
+    save_path: Path,
+    embedded: dict[str, str],
+) -> dict[str, Any]:
+    api_meta = (api_image or {}).get("meta") or {}
+    client_data = data.get("generation_data") if isinstance(data.get("generation_data"), dict) else {}
+    client_meta = image_generation_meta(data)
+
+    # The userscript's data comes from the frontend's generation-data
+    # endpoint and is usually richer than the public API; let it win.
+    meta = {**api_meta, **{k: v for k, v in client_meta.items() if v is not None}}
+
+    client_resources = client_data.get("resources")
+
+    return {
+        "schema": IMAGE_SIDECAR_SCHEMA,
+        "captured_at": now_iso(),
+        "image": {
+            "id": image_id,
+            "page_url": data.get("page_url"),
+            "source_url": image_url,
+            "width": (api_image or {}).get("width"),
+            "height": (api_image or {}).get("height"),
+            "base_model": (api_image or {}).get("baseModel"),
+            "model_version_ids": (api_image or {}).get("modelVersionIds"),
+            "username": (api_image or {}).get("username"),
+        },
+        "generation": {
+            "prompt": prompt or meta.get("prompt"),
+            "negative_prompt": meta.get("negativePrompt"),
+            "cfg_scale": meta.get("cfgScale"),
+            "steps": meta.get("steps"),
+            "sampler": meta.get("sampler"),
+            "scheduler": meta.get("scheduler"),
+            "seed": meta.get("seed"),
+            "clip_skip": meta.get("clipSkip"),
+            "size": meta.get("Size"),
+            "model": meta.get("Model"),
+            "process": client_data.get("process"),
+            "on_site": client_data.get("onSite"),
+            # The frontend resources carry model/version names; the meta
+            # variants only carry ids.
+            "resources": client_resources or meta.get("resources") or meta.get("civitaiResources"),
+        },
+        "embedded_metadata": {
+            # A1111-style generation parameters, if present in the file
+            "parameters": embedded.get("parameters"),
+            # ComfyUI prompt graph / workflow, if present in the file
+            "comfyui_prompt": _parse_json_maybe(embedded.get("prompt")),
+            "has_comfyui_workflow": bool(embedded.get("workflow")),
+            "has_civitai_comfy_workflow": comfy_workflow_from_request(data) is not None,
+        },
+        "local": {
+            "image_file": str(save_path),
+            "image_file_name": save_path.name,
+        },
+        "api_meta_raw": api_meta if SAVE_RAW_API_JSON else None,
+        "generation_data_raw": (client_data or None) if SAVE_RAW_API_JSON else None,
+    }
+
+
+def image_filename(data: dict[str, Any], image_url: str, image_id: Optional[int]) -> str:
+    requested = data.get("filename")
+    if requested:
+        return safe_filename(str(requested))
+
+    stem = f"civitai-image-{image_id}" if image_id else "civitai-image"
+    return f"{stem}{extension_from_url(image_url)}"
+
+
+def unique_image_destination_path(path: Path, write_prompt: bool) -> Path:
+    candidate = path
+    index = 1
+
+    while True:
+        temp_path = candidate.with_suffix(candidate.suffix + ".part")
+        prompt_path = candidate.with_suffix(".txt")
+        sidecar_path = candidate.with_suffix(".json")
+        prompt_clear = not write_prompt or not prompt_path.exists()
+
+        if not candidate.exists() and not temp_path.exists() and prompt_clear and not sidecar_path.exists():
+            return candidate
+
+        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
+        index += 1
+
+
+def parse_image_id_from_url(url: Optional[str]) -> Optional[int]:
+    if not url:
+        return None
+    try:
+        match = re.search(r"/images/(\d+)", urlparse(url).path)
+        return int(match.group(1)) if match else None
+    except Exception:
+        return None
+
+
+def existing_image_for_id(images_dir: Path, image_id: Optional[int]) -> Optional[Path]:
+    """An already-downloaded copy of this exact image, by its default stem."""
+    if not image_id or not images_dir.is_dir():
+        return None
+    for candidate in images_dir.glob(f"civitai-image-{image_id}.*"):
+        if candidate.suffix.lower() in _IMAGE_EXTENSIONS:
+            return candidate
+    return None
+
+
+async def fetch_civitai_image(
+    session: aiohttp.ClientSession, image_id: int
+) -> Optional[dict[str, Any]]:
+    try:
+        async with session.get(
+            CIVITAI_IMAGE_API, params={"imageId": str(image_id)}
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+    except Exception as exc:  # noqa: BLE001 -- enrichment only, never a blocker
+        log.info("civitai-direct: image API fetch failed for %s: %s",
+                 image_id, ascii(redact_civitai_token(exc)))
+        return None
+
+    items = data.get("items") or []
+    return items[0] if items else None
+
+
+def prompt_from_image_api(image_json: Optional[dict[str, Any]]) -> Optional[str]:
+    if not image_json:
+        return None
+    meta = image_json.get("meta") or {}
+    prompt = meta.get("prompt") or meta.get("Prompt")
+    return str(prompt).strip() if prompt else None
+
+
+# ============================================================
 # Jobs + routes
 # ============================================================
 
@@ -952,6 +1315,10 @@ async def civitai_health(request):
         )
     }
     key, source = get_api_key_with_source()
+    try:
+        workflows_dir = str(workflow_target_dir("default", "UnknownBaseModel").parent)
+    except Exception:  # noqa: BLE001 -- diagnostics only
+        workflows_dir = None
     return web.json_response({
         "status": "ok",
         "node": "ComfyUI-Civitai-Direct",
@@ -959,6 +1326,8 @@ async def civitai_health(request):
         "has_civitai_api_key": bool(key),
         "api_key_source": source,
         "dirs": dirs,
+        "images_dir": str(images_target_dir()),
+        "workflows_dir": workflows_dir,
     })
 
 
@@ -1035,6 +1404,156 @@ async def _handle_download(request):
 # payload ({url, metadata}), and the grid userscript's ({model_id, ...}).
 routes.post("/civitai/download")(_handle_download)
 routes.post("/civitai/download-by-id")(_handle_download)
+
+
+@routes.post("/civitai/download-image")
+async def civitai_download_image(request):
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(data, dict):
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
+    image_id = data.get("image_id") or parse_image_id_from_url(data.get("page_url"))
+    if not image_id and not data.get("image_url"):
+        return web.json_response(
+            {"error": "need image_id, image_url, or a Civitai /images/N page_url"},
+            status=400,
+        )
+
+    job_id = next(_job_ids)
+    JOBS[job_id] = {
+        "kind": "image",
+        "state": "resolving",
+        "image_id": image_id,
+        "bytes_done": 0,
+        "bytes_total": None,
+        "path": None,
+        "error": None,
+    }
+    asyncio.create_task(_run_image_download(job_id, data, image_id))
+    return web.json_response({"status": "queued", "job_id": job_id})
+
+
+async def _run_image_download(job_id: int, data: dict[str, Any], image_id: Optional[int]) -> None:
+    job = JOBS[job_id]
+    part: Optional[Path] = None
+    dest_key: Optional[str] = None
+    try:
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
+        async with aiohttp.ClientSession(headers=auth_headers(), timeout=timeout) as session:
+            api_image = await fetch_civitai_image(session, image_id) if image_id else None
+
+            image_url = (api_image or {}).get("url") or data.get("image_url")
+            if not image_url:
+                raise RuntimeError("no image URL found")
+
+            # Fetch the original upload rather than a width-optimized render;
+            # for PNGs this preserves embedded generation/ComfyUI metadata.
+            image_url = original_image_url(image_url)
+
+            client_prompt = str(image_generation_meta(data).get("prompt") or "").strip() or None
+            prompt = (
+                str(data.get("prompt") or "").strip()
+                or client_prompt
+                or prompt_from_image_api(api_image)
+            )
+
+            images_dir = images_target_dir()
+            existing = existing_image_for_id(images_dir, image_id)
+            if existing:
+                job.update(state="already_exists", path=str(existing))
+                log.info("civitai-direct: image %s already at %s",
+                         image_id, ascii(str(existing)))
+                return
+
+            images_dir.mkdir(parents=True, exist_ok=True)
+            requested_name = image_filename(data, image_url, image_id)
+            save_path = unique_image_destination_path(
+                images_dir / requested_name, write_prompt=bool(prompt)
+            )
+
+            job["state"] = "downloading"
+            async with session.get(image_url) as resp:
+                if resp.status in (401, 403):
+                    raise RuntimeError(
+                        f"Civitai returned {resp.status} for the image -- it may "
+                        "require a logged-in account (see /civitai/health for API key state)."
+                    )
+                resp.raise_for_status()
+
+                # The original file's real type often differs from the URL
+                # extension (Civitai serves originals from ".jpeg" URLs that
+                # are actually PNGs), so trust the content-type.
+                content_type = resp.headers.get("Content-Type", "")
+                actual_ext = extension_from_content_type(content_type, fallback="")
+                current_ext = ".jpg" if save_path.suffix.lower() == ".jpeg" else save_path.suffix.lower()
+                if actual_ext and actual_ext != current_ext:
+                    save_path = unique_image_destination_path(
+                        save_path.with_suffix(actual_ext), write_prompt=bool(prompt)
+                    )
+
+                dest_key = str(save_path).lower()
+                if dest_key in _ACTIVE_DESTS:
+                    dest_key = None
+                    raise RuntimeError("this image is already being downloaded")
+                _ACTIVE_DESTS.add(dest_key)
+
+                job["path"] = str(save_path)
+                total = resp.headers.get("Content-Length")
+                job["bytes_total"] = int(total) if total else None
+
+                part = save_path.with_suffix(save_path.suffix + ".part")
+                with part.open("wb") as fh:
+                    async for chunk in resp.content.iter_chunked(CHUNK):
+                        fh.write(chunk)
+                        job["bytes_done"] += len(chunk)
+
+            part.replace(save_path)
+            part = None
+
+            job["state"] = "writing_metadata"
+            embedded = (
+                await asyncio.to_thread(extract_png_text_chunks, save_path)
+                if save_path.suffix.lower() == ".png"
+                else {}
+            )
+
+            if prompt:
+                save_path.with_suffix(".txt").write_text(
+                    prompt.strip() + "\n", encoding="utf-8"
+                )
+
+            sidecar = build_image_sidecar(
+                data, image_id, image_url, prompt, api_image, save_path, embedded
+            )
+            write_json(save_path.with_suffix(".json"), sidecar)
+
+            # Save the ComfyUI graph beside the image whenever we have one:
+            # from the PNG itself, or (for JPEG/WebP originals with no embedded
+            # metadata) from the graph the userscript captured off the page.
+            workflow_json = _parse_json_maybe(embedded.get("workflow"))
+            if not isinstance(workflow_json, (dict, list)):
+                workflow_json = comfy_workflow_from_request(data)
+            if isinstance(workflow_json, (dict, list)):
+                write_json(save_path.with_suffix(".workflow.json"), workflow_json)
+
+            job["state"] = "done"
+            log.info("civitai-direct: saved image %s -> %s",
+                     image_id or "?", ascii(str(save_path)))
+    except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
+        message = redact_civitai_token(f"{type(exc).__name__}: {exc}")
+        job.update(state="error", error=message)
+        log.warning("civitai-direct: image job %s failed: %s", job_id, ascii(message))
+        if part is not None:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+    finally:
+        if dest_key is not None:
+            _ACTIVE_DESTS.discard(dest_key)
 
 
 async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -> None:

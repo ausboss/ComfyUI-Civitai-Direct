@@ -8,7 +8,7 @@
   <p>Part of the <a href="https://github.com/ausboss/ComfyUI-AusBoss">AusBoss</a> node family.</p>
 </div>
 
-A ComfyUI custom node + a Tampermonkey userscript. No separate server, no Python setup, no config wizard — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/SDXL/`, `checkpoints/SD 1.5/`, `diffusion_models/Flux.1 Dev/`, ...), while workflow ZIPs are safely extracted into ComfyUI's workflow library. Downloads include metadata sidecars, duplicate detection, and live progress on the button.
+A ComfyUI custom node + Tampermonkey userscripts. No separate server, no Python setup, no config wizard — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/SDXL/`, `checkpoints/SD 1.5/`, `diffusion_models/Flux.1 Dev/`, ...), workflow ZIPs are safely extracted into ComfyUI's workflow library, and gallery images save into your Pictures folder with their prompt and generation metadata. Downloads include metadata sidecars, duplicate detection, and live progress on the button.
 
 <!-- TODO: GIF of the ⚡ button on a Civitai model page -->
 
@@ -25,6 +25,7 @@ git clone https://github.com/ausboss/ComfyUI-Civitai-Direct
 
 - [civitai-direct.user.js](https://github.com/ausboss/ComfyUI-Civitai-Direct/raw/refs/heads/main/userscripts/civitai-direct.user.js) — download button on model pages
 - [civitai-direct-grid.user.js](https://github.com/ausboss/ComfyUI-Civitai-Direct/raw/refs/heads/main/userscripts/civitai-direct-grid.user.js) — ⚡ button on model cards (optional)
+- [civitai-direct-images.user.js](https://github.com/ausboss/ComfyUI-Civitai-Direct/raw/refs/heads/main/userscripts/civitai-direct-images.user.js) — ⬇ button on gallery images + prompt/workflow copy buttons (optional)
 
 That's it. With ComfyUI running, open any Civitai model page and the **⚡ Direct to Server** button appears next to the native download button.
 
@@ -52,8 +53,18 @@ The two files are re-read on every download — add the key and click ⚡ again,
 | Embedding | `embeddings/<base model>/` |
 | VAE / ControlNet / Upscaler / Text Encoder / Hypernetwork | matching folder, `<base model>/` subfolder |
 | Workflow / Workflows | `user/<user>/workflows/civitai-direct/<base model>/<workflow>/` |
+| Gallery images | `<your Pictures folder>/Civitai/` |
 
-Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). New files show up in ComfyUI's loaders immediately — no restart.
+Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). New files show up in ComfyUI's loaders immediately — no restart. Images save as the *original* upload (PNG originals keep their embedded generation metadata) plus a `.json` sidecar, the prompt as a `.txt`, and — when the image carries a ComfyUI graph — a ready-to-load `.workflow.json`.
+
+**Custom folders.** Two optional settings override the image and workflow destinations — set them as environment variables or in the same `.env` file as the API key (re-read per download, no restart needed):
+
+```
+CIVITAI_IMAGE_DIR=D:\my\image\folder
+CIVITAI_WORKFLOW_DIR=D:\my\workflow\folder
+```
+
+Unset, images go to your OS Pictures folder (`Civitai/` subfolder; relocated/OneDrive Pictures folders and Linux XDG dirs are honored) and workflows go to ComfyUI's own workflow library. `/civitai/health` shows the resolved `images_dir` and `workflows_dir`.
 
 **Duplicates are skipped, not copied.** Two checks run before any download: a version you already grabbed through this tool is recognized by its sidecar, and a same-named file from *anywhere else* (manual download, another tool) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten.
 
@@ -68,7 +79,7 @@ If you run ComfyUI on a port other than 8188/8189, add it to `SERVER_PORTS` at t
 
 ## Image & workflow tools
 
-Direct Civitai workflow assets are supported here: ZIPs are extracted, direct JSON/PNG artifacts are preserved, and metadata stays outside the workflow picker. Prompt/image downloading and workflow extraction from gallery images remain in the sibling project [easy-civitai-downloader](https://github.com/ausboss/easy-civitai-downloader) (standalone server).
+Civitai workflow assets are supported here: ZIPs are extracted, direct JSON/PNG artifacts are preserved, and metadata stays outside the workflow picker. Gallery images are too, via the images userscript: each image card gets an outline showing what generation data it has (green = full ComfyUI graph, blue = prompt/parameters, red = nothing), hover buttons copy the prompt / A1111-style info block / ComfyUI nodes to the clipboard, and ⬇ saves the original image with its metadata. The standalone-server variant of these tools lives in the sibling project [easy-civitai-downloader](https://github.com/ausboss/easy-civitai-downloader).
 
 ## Development
 
@@ -84,7 +95,7 @@ Fair question for something that connects your browser to your filesystem. The r
 // @connect      127.0.0.1
 ```
 
-**Where can it write?** Only into folders derived from ComfyUI's `folder_paths`: model folders, the requesting user's workflow library, and that user's Civitai Direct metadata folder. Every path component built from Civitai data is sanitized first, and workflow ZIP entries are checked before extraction so they cannot escape the destination folder:
+**Where can it write?** Only into folders derived from ComfyUI's `folder_paths` (model folders, the requesting user's workflow library and metadata folder), your Pictures `Civitai/` folder for images, and any folder *you* point `CIVITAI_IMAGE_DIR` / `CIVITAI_WORKFLOW_DIR` at. Every path component built from Civitai data is sanitized first, and workflow ZIP entries are checked before extraction so they cannot escape the destination folder:
 
 ```python
 value = re.sub(r"[<>:\"/\\|?*\x00-\x1F]", "_", value)   # safe_filename()
@@ -103,7 +114,7 @@ def redact_civitai_token(text):
 
 ## Does this send my data to Civitai or anyone else?
 
-**One host, total.** Every outbound request in the codebase goes to `civitai.com` (which redirects file downloads to Civitai's own CDN). Verify yourself:
+**One site, total.** Every outbound request in the codebase goes to `civitai.com` or its own image CDN `image.civitai.com` (file downloads redirect to Civitai's CDN). Verify yourself:
 
 ```bash
 grep -n "https://" __init__.py
@@ -112,9 +123,10 @@ grep -n "https://" __init__.py
 ```python
 CIVITAI_MODEL_API = "https://civitai.com/api/v1/models/{model_id}"
 CIVITAI_VERSION_API = "https://civitai.com/api/v1/model-versions/{version_id}"
+CIVITAI_IMAGE_API = "https://civitai.com/api/v1/images"
 ```
 
-Per download, exactly three things leave your machine, all to Civitai: a metadata lookup for the model you clicked, the file request itself, and — only if you configured one — your API key attached to those requests. That's the same information Civitai gets when you click their own download button while logged in.
+Per download, exactly three things leave your machine, all to Civitai: a metadata lookup for the model or image you clicked, the file request itself, and — only if you configured one — your API key attached to those requests. That's the same information Civitai gets when you click their own download button while logged in.
 
 **Nothing else, nobody else.** No telemetry, no analytics, no version phone-home, no error reporting service, no accounts. The userscripts run only on Civitai pages (`@match *://civitai.com/*`) and send the model id/URL of the thing you clicked to your own machine (`127.0.0.1`) — they read nothing else off the page and can't contact any other host. Your prompts, workflows, generations, and library never leave your computer through anything in this repo.
 

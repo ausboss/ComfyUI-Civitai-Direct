@@ -34,20 +34,27 @@ downloading — image/prompt tools live in easy-civitai-downloader.
 __init__.py       # the whole node: aiohttp routes on ComfyUI's own server.
                   # Defines NO graph nodes — NODE_CLASS_MAPPINGS is empty.
 userscripts/
-  civitai-direct.user.js       # model-page download button
-  civitai-direct-grid.user.js  # per-card button on listing pages
+  civitai-direct.user.js        # model-page download button
+  civitai-direct-grid.user.js   # per-card button on listing pages
+  civitai-direct-images.user.js # gallery image saver + prompt/nodes copy buttons
 ```
 
-Routes are namespaced under `/civitai/*`. Destination folders always come
-from ComfyUI's `folder_paths` (which already honors extra_model_paths.yaml);
-never invent a parallel path-config mechanism — killing that config was the
-point of this design.
+Routes are namespaced under `/civitai/*`. Model destination folders always
+come from ComfyUI's `folder_paths` (which already honors
+extra_model_paths.yaml); never invent a parallel path-config mechanism —
+killing that config was the point of this design. The only path settings are
+`CIVITAI_IMAGE_DIR` / `CIVITAI_WORKFLOW_DIR` (env or `.env`), because images
+and workflows have no `folder_paths` entry; their defaults are the OS
+Pictures folder and ComfyUI's user workflow library.
 
 ## Compatibility contracts (never break these)
 
 - The sidecar schema `ausboss-civitai-model-sidecar-v1`: key names and
   structure are shared with easy-civitai-downloader's backfill/scrub tools
   and duplicate detection. Additive changes only; renames need a new schema id.
+- Same deal for the image sidecar schema `ausboss-civitai-image-sidecar-v1`
+  and the `/civitai/download-image` payload
+  (`{image_id, image_url, page_url, prompt, filename, generation_data}`).
 - `/civitai/download` accepts BOTH payload shapes: the page userscript's
   `{url, metadata}` and the grid userscript's `{model_id, model_version_id}`.
   Installed userscripts update lazily via @updateURL — old payloads keep

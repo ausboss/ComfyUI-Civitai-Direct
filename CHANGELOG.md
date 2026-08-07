@@ -4,7 +4,9 @@ All notable changes to ComfyUI-Civitai-Direct are documented here.
 
 ## 0.1.0
 
-- Added the `/civitai/*` routes on ComfyUI's own server: `health`, `download`, `status`, `jobs`.
+- Added the `/civitai/*` routes on ComfyUI's own server: `health`, `download`, `download-image`, `status`, `jobs`.
+- Added gallery-image downloads (`/civitai/download-image` + the images userscript, ported from easy-civitai-downloader): fetches the original upload (PNG originals keep embedded generation/ComfyUI metadata), writes a `.json` sidecar (schema `ausboss-civitai-image-sidecar-v1`), the prompt as `.txt`, and the ComfyUI graph as `.workflow.json` when one exists; already-downloaded image ids are skipped as `already_exists`.
+- Added `CIVITAI_IMAGE_DIR` and `CIVITAI_WORKFLOW_DIR` settings (environment or `.env`, re-read per download). Defaults: the OS Pictures folder (`Civitai/` subfolder; Windows known-folder and Linux XDG aware) for images, ComfyUI's user workflow library for workflows. `/civitai/health` reports the resolved `images_dir` and `workflows_dir`.
 - Added type routing via `folder_paths` — SD-family checkpoints to `checkpoints/`, Flux/Wan/LTX to `diffusion_models/`, LyCORIS/DoRA to `loras/`, embeddings, VAE, ControlNet, upscalers, text encoders — each under a normalized `<base model>/` subfolder.
 - Added `.json` + `.md` metadata sidecars (schema `ausboss-civitai-model-sidecar-v1`, shared with easy-civitai-downloader) with SHA256, trigger words, and token redaction.
 - Added classification metadata to both sidecars so other tools can sort, filter, and identify files without re-querying Civitai: decoded NSFW browsing levels (per-version and per-model), the `poi` / `minor` / `sfwOnly` flags, availability and usage control, file format / precision / pruned-or-full, pickle and virus scan results, licensing permissions, per-version stats, and Civitai's full hash set (AutoV1/V2/V3, CRC32, BLAKE3). The `.md` note gained a matching `## Classification` section.
