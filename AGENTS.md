@@ -67,8 +67,9 @@ Pictures folder and ComfyUI's user workflow library.
 
 - Console output must be crash-proof on a cp1252 Windows console: Civitai
   model names routinely contain CJK/emoji, so never print or log them raw —
-  log ids and `ascii()`-wrapped paths only. (A raw print of a model name is
-  exactly the bug that silently killed downloads in the predecessor server.)
+  pass every name/path through `console_safe()` (ASCII with backslash
+  escapes). (A raw print of a model name is exactly the bug that silently
+  killed downloads in the predecessor server.)
 - Downloads stream in 1 MiB chunks with an `await` per chunk and write to a
   `.part` file renamed only on success. Long blocking work (hashing) goes
   through `asyncio.to_thread`.

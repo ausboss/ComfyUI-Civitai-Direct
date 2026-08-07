@@ -697,6 +697,26 @@ def build_classification(
     }
 
 
+async def probe_gate_reason(session: aiohttp.ClientSession, url: str) -> str:
+    """Ask the download endpoint WHY it refused, as JSON.
+
+    Sent a browser-like User-Agent, Civitai answers a gated download with a
+    redirect to an HTML page; sent a plain client UA it explains itself:
+    403 {"error": "Early Access", "deadline": ...}. Returns '' on anything
+    unexpected -- this only ever decorates an error we already have."""
+    try:
+        async with session.get(
+            url,
+            headers={"User-Agent": "ComfyUI-Civitai-Direct", "Accept": "application/json"},
+            allow_redirects=False,
+        ) as resp:
+            if resp.status in (401, 403):
+                return (await resp.text())[:2000]
+    except Exception:  # noqa: BLE001 -- best-effort diagnostics
+        pass
+    return ""
+
+
 async def fetch_json(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
     async with session.get(url) as resp:
         if resp.status in (401, 403):
@@ -750,7 +770,7 @@ async def resolve_model(
             )
         except Exception as exc:  # noqa: BLE001 -- extra detail, never a blocker
             log.info("civitai-direct: version %s detail unavailable (%s)",
-                     version_json.get("id"), ascii(redact_civitai_token(exc)))
+                     version_json.get("id"), console_safe(redact_civitai_token(exc)))
     if detail_json:
         version_json = {**detail_json, **version_json}
 
@@ -796,6 +816,13 @@ async def resolve_model(
 
 def redact_civitai_token(text: Any) -> str:
     return re.sub(r"([?&]token=)[^&\s]+", r"\1REDACTED", str(text or ""))
+
+
+def console_safe(value: Any) -> str:
+    """ASCII-only rendering for console output. Civitai model names routinely
+    carry CJK/emoji that crash a cp1252 Windows console when printed raw;
+    this keeps ASCII text readable and escapes the rest."""
+    return str(value if value is not None else "").encode("ascii", "backslashreplace").decode("ascii")
 
 
 def build_sidecar_json(
@@ -1001,10 +1028,40 @@ def matching_downloaded_version_sidecar(target_dir: Path, meta: dict[str, Any]) 
         if requested_model and model_id and str(model_id) != requested_model:
             continue
 
-        local_model_file = (payload.get("local") or {}).get("model_file")
+        local = payload.get("local") or {}
+        local_model_file = local.get("model_file")
         if local_model_file and Path(str(local_model_file)).exists():
             return Path(str(local_model_file))
+
+        # The file may have been moved (with its sidecars) to another folder,
+        # leaving the recorded absolute path stale -- trust a copy sitting
+        # next to the sidecar that recorded it.
+        moved_name = local.get("model_file_name") or (
+            Path(str(local_model_file)).name if local_model_file else None
+        )
+        if moved_name:
+            moved = sidecar_path.parent / str(moved_name)
+            if moved.exists():
+                return moved
     return None
+
+
+def find_same_named_files(root: Path, filename: str, limit: int = 5) -> list[Path]:
+    """Files named `filename` anywhere under root, subfolders included, so a
+    model the user reorganized into a subfolder is still recognized. Bounded
+    because every match may get hashed."""
+    if not filename or not root.is_dir():
+        return []
+    matches: list[Path] = []
+    try:
+        for path in root.rglob(filename):
+            if path.is_file():
+                matches.append(path)
+                if len(matches) >= limit:
+                    break
+    except OSError:
+        pass
+    return matches
 
 
 async def calculate_sha256(path: Path) -> str:
@@ -1121,7 +1178,7 @@ def extract_png_text_chunks(path: Path) -> dict[str, str]:
                     break
     except Exception as exc:
         log.warning("civitai-direct: failed to read PNG text chunks from %s: %s",
-                    ascii(path.name), ascii(exc))
+                    console_safe(path.name), console_safe(exc))
 
     return result
 
@@ -1281,7 +1338,7 @@ async def fetch_civitai_image(
             data = await resp.json()
     except Exception as exc:  # noqa: BLE001 -- enrichment only, never a blocker
         log.info("civitai-direct: image API fetch failed for %s: %s",
-                 image_id, ascii(redact_civitai_token(exc)))
+                 image_id, console_safe(redact_civitai_token(exc)))
         return None
 
     items = data.get("items") or []
@@ -1464,8 +1521,8 @@ async def _run_image_download(job_id: int, data: dict[str, Any], image_id: Optio
             existing = existing_image_for_id(images_dir, image_id)
             if existing:
                 job.update(state="already_exists", path=str(existing))
-                log.info("civitai-direct: image %s already at %s",
-                         image_id, ascii(str(existing)))
+                log.info("civitai-direct: job %s: image %s already downloaded -> %s",
+                         job_id, image_id, console_safe(existing))
                 return
 
             images_dir.mkdir(parents=True, exist_ok=True)
@@ -1503,6 +1560,10 @@ async def _run_image_download(job_id: int, data: dict[str, Any], image_id: Optio
                 job["path"] = str(save_path)
                 total = resp.headers.get("Content-Length")
                 job["bytes_total"] = int(total) if total else None
+                log.info("civitai-direct: job %s: downloading image %s (%s) -> %s",
+                         job_id, image_id or "?",
+                         format_size(job["bytes_total"]) or "unknown size",
+                         console_safe(save_path))
 
                 part = save_path.with_suffix(save_path.suffix + ".part")
                 with part.open("wb") as fh:
@@ -1520,10 +1581,12 @@ async def _run_image_download(job_id: int, data: dict[str, Any], image_id: Optio
                 else {}
             )
 
+            extras = [".json sidecar"]
             if prompt:
                 save_path.with_suffix(".txt").write_text(
                     prompt.strip() + "\n", encoding="utf-8"
                 )
+                extras.append(".txt prompt")
 
             sidecar = build_image_sidecar(
                 data, image_id, image_url, prompt, api_image, save_path, embedded
@@ -1538,14 +1601,16 @@ async def _run_image_download(job_id: int, data: dict[str, Any], image_id: Optio
                 workflow_json = comfy_workflow_from_request(data)
             if isinstance(workflow_json, (dict, list)):
                 write_json(save_path.with_suffix(".workflow.json"), workflow_json)
+                extras.append(".workflow.json ComfyUI graph")
 
             job["state"] = "done"
-            log.info("civitai-direct: saved image %s -> %s",
-                     image_id or "?", ascii(str(save_path)))
+            log.info("civitai-direct: job %s: done -> %s (+ %s)",
+                     job_id, console_safe(save_path), ", ".join(extras))
     except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
         message = redact_civitai_token(f"{type(exc).__name__}: {exc}")
         job.update(state="error", error=message)
-        log.warning("civitai-direct: image job %s failed: %s", job_id, ascii(message))
+        log.warning("civitai-direct: job %s: image download failed: %s",
+                    job_id, console_safe(message))
         if part is not None:
             try:
                 part.unlink(missing_ok=True)
@@ -1577,6 +1642,17 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
             model_type = normalize_model_type(meta["type"])
             workflow_download = model_type == "Workflow"
 
+            log.info(
+                "civitai-direct: job %s: %s (%s) -- %s / %s [model %s, version %s]",
+                job_id,
+                console_safe(meta["model_name"]),
+                console_safe(meta["version_name"] or "?"),
+                model_type,
+                console_safe(meta["base_model"]),
+                meta["model_id"],
+                meta["model_version_id"],
+            )
+
             file = pick_primary_model_file(version_json)
             if file is None:
                 raise RuntimeError("this version has no downloadable files")
@@ -1604,8 +1680,8 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 existing = matching_downloaded_version_sidecar(target_dir, meta)
             if existing:
                 job.update(state="already_exists", path=str(existing))
-                log.info("civitai-direct: version %s already at %s",
-                         meta["model_version_id"], ascii(str(existing)))
+                log.info("civitai-direct: job %s: already downloaded -> %s",
+                         job_id, console_safe(existing))
                 return
 
             # Second duplicate layer, for files this tool didn't download (no
@@ -1639,29 +1715,51 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                     write_json(json_path, sidecar)
                     if SAVE_MARKDOWN_NOTES:
                         write_markdown(path.with_suffix(path.suffix + ".md"), sidecar)
-                log.info("civitai-direct: identical file already on disk -> %s",
-                         ascii(str(path)))
+                log.info("civitai-direct: job %s: identical file already on disk, adopted -> %s",
+                         job_id, console_safe(path))
 
             expected_name = (
                 slug_aware_filename(meta) if not workflow_download and is_wan_model(meta)
                 else safe_filename(file.get("name") or "") or slug_aware_filename(meta)
             )
-            if not workflow_download and await same_bytes_already_here(target_dir / expected_name):
-                adopt_existing(target_dir / expected_name)
-                return
+            # Search the whole type folder (loras/, checkpoints/, ...), not just
+            # the target dir: a model the user moved into a subfolder -- or
+            # another base-model folder -- still counts as already here.
+            if not workflow_download:
+                for candidate in find_same_named_files(target_dir.parent, expected_name):
+                    if await same_bytes_already_here(candidate):
+                        adopt_existing(candidate)
+                        return
 
             job["state"] = "downloading"
             key, key_source = get_api_key_with_source()
             key_desc = f"API key loaded from {key_source}" if key else "no API key configured"
             availability = version_json.get("availability")
 
-            def _gated_error(detail: str) -> RuntimeError:
-                if availability == "EarlyAccess":
+            def _gated_error(detail: str, body_text: str = "") -> RuntimeError:
+                # The download endpoint is the one honest source of Early
+                # Access state: the models API reports these versions as
+                # "Public", but a 403 comes back as JSON like {"error":
+                # "Early Access", "deadline": "2026-08-22T18:30:00.000Z"}.
+                body: dict[str, Any] = {}
+                try:
+                    parsed = json.loads(body_text) if body_text else None
+                    if isinstance(parsed, dict):
+                        body = parsed
+                except ValueError:
+                    pass
+                api_error = str(body.get("error") or "")
+                if availability == "EarlyAccess" or "early access" in api_error.lower():
+                    deadline = str(body.get("deadline") or "")[:10]
+                    when = (
+                        f"It unlocks for everyone on {deadline}."
+                        if deadline
+                        else "It becomes downloadable when the early-access window ends."
+                    )
                     return RuntimeError(
                         f"{detail} -- this version is in Early Access, which needs the "
                         "early-access purchase/subscription on your Civitai account. "
-                        f"An API key alone does not unlock it ({key_desc}). "
-                        "It becomes downloadable when the early-access window ends."
+                        f"An API key alone does not unlock it ({key_desc}). {when}"
                     )
                 return RuntimeError(
                     f"{detail} -- the model requires a logged-in account "
@@ -1672,10 +1770,19 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
 
             async with session.get(add_token_to_url(download_url)) as resp:
                 if resp.status in (401, 403):
-                    raise _gated_error(f"Civitai returned {resp.status}")
+                    try:
+                        body_text = (await resp.text())[:2000]
+                    except Exception:  # noqa: BLE001 -- the status alone still errors fine
+                        body_text = ""
+                    if not body_text.lstrip().startswith("{"):
+                        body_text = await probe_gate_reason(session, download_url) or body_text
+                    raise _gated_error(f"Civitai returned {resp.status}", body_text)
                 resp.raise_for_status()
                 if "text/html" in resp.headers.get("Content-Type", ""):
-                    raise _gated_error("Civitai returned HTML instead of a model file")
+                    raise _gated_error(
+                        "Civitai returned HTML instead of a model file",
+                        await probe_gate_reason(session, download_url),
+                    )
 
                 served_name = None
                 if resp.content_disposition and resp.content_disposition.filename:
@@ -1708,6 +1815,9 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 job["path"] = str(workflow_artifact or dest)
                 total = resp.headers.get("Content-Length")
                 job["bytes_total"] = int(total) if total else None
+                log.info("civitai-direct: job %s: downloading %s -> %s",
+                         job_id, format_size(job["bytes_total"]) or "unknown size",
+                         console_safe(dest))
 
                 with part.open("wb") as fh:
                     async for chunk in resp.content.iter_chunked(CHUNK):
@@ -1756,14 +1866,14 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 write_markdown(markdown_path, sidecar)
 
             job["state"] = "done"
-            log.info("civitai-direct: saved model %s version %s -> %s",
-                     meta["model_id"], meta["model_version_id"], ascii(str(artifact_path)))
+            log.info("civitai-direct: job %s: done -> %s (+ .json/.md sidecars)",
+                     job_id, console_safe(artifact_path))
     except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
         # Redact before storing: aiohttp errors embed the request URL, which
         # now carries ?token=, and the job record reaches the browser console.
         message = redact_civitai_token(f"{type(exc).__name__}: {exc}")
         job.update(state="error", error=message)
-        log.warning("civitai-direct: job %s failed: %s", job_id, ascii(message))
+        log.warning("civitai-direct: job %s: failed: %s", job_id, console_safe(message))
         if part is not None:
             try:
                 part.unlink(missing_ok=True)

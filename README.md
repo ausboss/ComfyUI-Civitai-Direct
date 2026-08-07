@@ -41,7 +41,7 @@ The two files are re-read on every download — add the key and click ⚡ again,
 
 **To check what the node sees**, open `http://127.0.0.1:8188/civitai/health` (your port): `has_civitai_api_key` tells you whether a key loaded and `api_key_source` tells you where from.
 
-**An API key is not a skeleton key.** *Early Access* versions are time-gated to supporters — they need the early-access purchase/subscription on your account, and no API key changes that. The error message will say so; the model becomes downloadable for everyone when its early-access window ends.
+**An API key is not a skeleton key.** *Early Access* versions are time-gated to supporters — they need the early-access purchase/subscription on your account, and no API key changes that. The userscripts warn you up front: on grid cards and model pages the button turns **yellow ⚡ Early Access**, and the grid button won't fire on a single click (click twice if you've actually purchased the version). If a download is attempted anyway, the error names the reason and the date the version unlocks for everyone.
 
 ## Where files go
 
@@ -66,7 +66,7 @@ CIVITAI_WORKFLOW_DIR=D:\my\workflow\folder
 
 Unset, images go to your OS Pictures folder (`Civitai/` subfolder; relocated/OneDrive Pictures folders and Linux XDG dirs are honored) and workflows go to ComfyUI's own workflow library. `/civitai/health` shows the resolved `images_dir` and `workflows_dir`.
 
-**Duplicates are skipped, not copied.** Two checks run before any download: a version you already grabbed through this tool is recognized by its sidecar, and a same-named file from *anywhere else* (manual download, another tool) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten.
+**Duplicates are skipped, not copied.** Two checks run before any download: a version you already grabbed through this tool is recognized by its sidecar, and a same-named file from *anywhere else* (manual download, another tool) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Both checks follow your reorganizing: a model you moved into a subfolder — or a different base-model folder of the same type — is still recognized, with or without its sidecars. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten.
 
 If you run ComfyUI on a port other than 8188/8189, add it to `SERVER_PORTS` at the top of the userscript.
 

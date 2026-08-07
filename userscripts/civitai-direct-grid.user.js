@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI (Grid)
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.1.0
+// @version      0.1.1
 // @description  Adds a quick-download button to each model card on Civitai listing/grid pages (ComfyUI-Civitai-Direct).
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -73,6 +73,33 @@
     const MARK = 'data-tm-grid-btn';
     const BUTTON_MARK = 'data-tm-grid-server-btn';
 
+    const IDLE_BG = 'linear-gradient(135deg,#0b7285,#0c8599)';
+    const EA_BG = 'linear-gradient(135deg,#f59f00,#fab005)';
+
+    // Civitai renders a literal "Early Access" status badge on cards whose
+    // newest version is still inside its early-access window (ModelCard.tsx:
+    // isEarlyAccess = earlyAccessDeadline > now). The newest version is also
+    // what a grid download would fetch, so the badge is exactly our signal.
+    function isEarlyAccessCard(card) {
+        for (const el of card.querySelectorAll('span,div,p,strong,b')) {
+            if (el.childElementCount === 0 && /^early access$/i.test((el.textContent || '').trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function applyEarlyAccessLook(btn) {
+        btn.dataset.cdEa = '1';
+        btn.textContent = '⚡';
+        btn.style.background = EA_BG;
+        btn.style.color = '#1a1b1e';
+        btn.style.opacity = '0.65';
+        btn.style.cursor = 'not-allowed';
+        btn.title = 'Early Access — needs the purchase/subscription on your Civitai account. Click twice to try anyway.';
+        btn.setAttribute('aria-label', btn.title);
+    }
+
     function isModelDetailPage() {
         return /^\/models\/\d+(?:\/|$)/.test(window.location.pathname);
     }
@@ -112,15 +139,30 @@
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
+
+            // Early Access: block the accidental click. A second click within
+            // 3s still sends it, for accounts that purchased the version.
+            if (btn.dataset.cdEa === '1' && btn.dataset.cdEaArmed !== '1') {
+                btn.dataset.cdEaArmed = '1';
+                btn.textContent = '🔒';
+                console.info('[Civitai Direct] Early Access model — needs the purchase on your Civitai account. Click again to try anyway.');
+                setTimeout(() => { btn.dataset.cdEaArmed = ''; applyEarlyAccessLook(btn); }, 3000);
+                return;
+            }
+            btn.dataset.cdEaArmed = '';
             btn.textContent = '⏳';
 
-            const IDLE_BG = 'linear-gradient(135deg,#0b7285,#0c8599)';
+            const wasEa = btn.dataset.cdEa === '1';
             const OK_BG = 'linear-gradient(135deg,#2b8a3e,#37b24d)';
             const ERR_BG = 'linear-gradient(135deg,#c92a2a,#e03131)';
             const settle = (ok) => {
                 btn.textContent = ok ? '✅' : '❌';
                 btn.style.background = ok ? OK_BG : ERR_BG;
-                setTimeout(() => { btn.textContent = '⚡'; btn.style.background = IDLE_BG; }, 3000);
+                setTimeout(() => {
+                    if (wasEa) { applyEarlyAccessLook(btn); return; }
+                    btn.textContent = '⚡';
+                    btn.style.background = IDLE_BG;
+                }, 3000);
             };
 
             discoverServer((base) => {
@@ -175,7 +217,17 @@
             if (!card) return;
             link.setAttribute(MARK, '1');
             if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
-            card.appendChild(makeButton(info));
+            const btn = makeButton(info);
+            if (isEarlyAccessCard(card)) applyEarlyAccessLook(btn);
+            card.appendChild(btn);
+        });
+
+        // Cards hydrate progressively, so the Early Access badge can appear
+        // after our button did — re-check idle buttons on every pass.
+        document.querySelectorAll('button[' + BUTTON_MARK + ']:not([data-cd-ea="1"])').forEach(btn => {
+            if (btn.textContent === '⚡' && btn.parentElement && isEarlyAccessCard(btn.parentElement)) {
+                applyEarlyAccessLook(btn);
+            }
         });
     }
 

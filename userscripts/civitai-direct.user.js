@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.1.0
+// @version      0.1.1
 // @description  One-click Civitai model downloads straight into your ComfyUI model folders, via the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -269,6 +269,14 @@
         }
 
         return null;
+    }
+
+    // Civitai's version-specific early-access notice ("The creator ... has
+    // set this version to Early Access ...", EarlyAccessAlert.tsx) only
+    // renders for the currently selected version while its window is open —
+    // unlike the title chip, which flags the whole model.
+    function isEarlyAccessSelectedVersion() {
+        return /set this version to Early Access/i.test(document.body.innerText || '');
     }
 
     function getTitleText() {
@@ -605,6 +613,18 @@
         const labelBits = [modelType, baseModel].filter(Boolean).join(' / ');
         const labelBase = labelBits ? `Direct to Server (${labelBits})` : 'Direct to Server';
 
+        if (state === 'idle' && button.dataset.cdEa === '1') {
+            button.textContent = labelBits ? `⚡ Early Access (${labelBits})` : '⚡ Early Access';
+            button.style.background = 'linear-gradient(135deg, #f59f00, #fab005)';
+            button.style.color = '#1a1b1e';
+            button.disabled = false;
+            button.style.opacity = '0.8';
+            button.title = 'Early Access — needs the purchase/subscription on your Civitai account. Click to try anyway.';
+            return;
+        }
+        button.style.color = '#ffffff';
+        button.title = '';
+
         if (state === 'idle') {
             button.textContent = `⚡ ${labelBase}`;
             button.style.background = 'linear-gradient(135deg, #0b7285, #0c8599)';
@@ -689,6 +709,7 @@
         button.setAttribute('data-tm-role', 'direct-server-download');
 
         applyButtonStyles(button);
+        button.dataset.cdEa = isEarlyAccessSelectedVersion() ? '1' : '';
         setButtonState(button, 'idle', metadata.base_model, metadata.type);
 
         button.addEventListener('mouseenter', () => {
@@ -803,7 +824,7 @@
 
         if (!downloadUrl) return;
 
-        const renderKey = `${location.pathname}|${metadata.model_version_id || ''}|${metadata.base_model || ''}|${downloadUrl}`;
+        const renderKey = `${location.pathname}|${metadata.model_version_id || ''}|${metadata.base_model || ''}|${downloadUrl}|ea:${isEarlyAccessSelectedVersion() ? 1 : 0}`;
 
         if (existing && existing.dataset.renderKey === renderKey) return;
 
