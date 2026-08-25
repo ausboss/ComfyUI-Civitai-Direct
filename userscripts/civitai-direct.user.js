@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.1.1
+// @version      0.2.0
 // @description  One-click Civitai model downloads straight into your ComfyUI model folders, via the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -42,6 +42,22 @@
         }
     }
 
+    // Re-validate the cached server (or discover one). Used by the health
+    // badge and by clicks, so a ComfyUI restart -- even on the other port --
+    // heals without a second click.
+    function probeServer(callback) {
+        if (!serverBase) { discoverServer(callback); return; }
+        const rediscover = () => { serverBase = null; discoverServer(callback); };
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${serverBase}/civitai/health`,
+            timeout: 1500,
+            onload(res) { if (res.status === 200) callback(serverBase); else rediscover(); },
+            onerror: rediscover,
+            ontimeout: rediscover,
+        });
+    }
+
     // Poll a queued job until it reaches a terminal state, reporting progress.
     function pollJob(base, jobId, onProgress, onDone) {
         const startedAt = Date.now();
@@ -56,8 +72,8 @@
                     let job;
                     try { job = JSON.parse(res.responseText); } catch (_) { job = null; }
                     if (!job) { onDone(false, 'bad status payload'); return; }
-                    if (job.state === 'done' || job.state === 'already_exists') { onDone(true, job.state); return; }
-                    if (job.state === 'error') { onDone(false, job.error || 'download failed'); return; }
+                    if (job.state === 'done' || job.state === 'already_exists') { onDone(true, job.state, job); return; }
+                    if (job.state === 'error') { onDone(false, job.error || 'download failed', job); return; }
                     onProgress(job);
                     setTimeout(tick, 1000);
                 },
@@ -609,9 +625,34 @@
         button.style.transition = 'background-color 0.15s ease, opacity 0.15s ease, transform 0.08s ease';
     }
 
+    const HAVE_BG = 'linear-gradient(135deg, #5f3dc4, #7048e8)';
+    const OFFLINE_TITLE = `No running ComfyUI with the Civitai-Direct node found on ports ${SERVER_PORTS.join(', ')}. Start ComfyUI, then click to retry.`;
+
     function setButtonState(button, state, baseModel = '', modelType = '') {
         const labelBits = [modelType, baseModel].filter(Boolean).join(' / ');
         const labelBase = labelBits ? `Direct to Server (${labelBits})` : 'Direct to Server';
+
+        if (state === 'idle' && button.dataset.cdOffline === '1') {
+            button.textContent = '🔌 ComfyUI Offline';
+            button.style.background = 'linear-gradient(135deg, #c92a2a, #e03131)';
+            button.style.color = '#ffffff';
+            button.disabled = false;
+            button.style.opacity = '0.9';
+            button.title = OFFLINE_TITLE;
+            return;
+        }
+
+        if (state === 'idle' && button.dataset.cdHave === '1') {
+            button.textContent = labelBits ? `📁 In Your Library (${labelBits})` : '📁 In Your Library';
+            button.style.background = HAVE_BG;
+            button.style.color = '#ffffff';
+            button.disabled = false;
+            button.style.opacity = '1';
+            button.title = button.dataset.cdHavePath
+                ? `Already downloaded: ${button.dataset.cdHavePath}\nClick to re-check on the server.`
+                : 'Already downloaded. Click to re-check on the server.';
+            return;
+        }
 
         if (state === 'idle' && button.dataset.cdEa === '1') {
             button.textContent = labelBits ? `⚡ Early Access (${labelBits})` : '⚡ Early Access';
@@ -642,10 +683,28 @@
         }
 
         if (state === 'success') {
+            button.textContent = '✅ Saved to Library';
+            button.style.background = 'linear-gradient(135deg, #2b8a3e, #37b24d)';
+            button.disabled = false;
+            button.style.opacity = '1';
+            return;
+        }
+
+        // Older servers reply without a job id -- queued is all we know.
+        if (state === 'sent') {
             button.textContent = '✅ Server Queued Download';
             button.style.background = 'linear-gradient(135deg, #2b8a3e, #37b24d)';
             button.disabled = false;
             button.style.opacity = '1';
+            return;
+        }
+
+        if (state === 'exists') {
+            button.textContent = '📁 Already in Your Library';
+            button.style.background = HAVE_BG;
+            button.disabled = false;
+            button.style.opacity = '1';
+            if (button.dataset.cdHavePath) button.title = `Already downloaded: ${button.dataset.cdHavePath}`;
             return;
         }
 
@@ -658,10 +717,11 @@
         }
 
         if (state === 'offline') {
-            button.textContent = '❌ Server Offline';
+            button.textContent = '🔌 ComfyUI Offline';
             button.style.background = 'linear-gradient(135deg, #c92a2a, #e03131)';
             button.disabled = false;
             button.style.opacity = '1';
+            button.title = OFFLINE_TITLE;
         }
     }
 
@@ -737,20 +797,24 @@
             }
 
             console.log('[Civitai Direct] Sending payload:', payload);
+            button.dataset.cdBusy = '1';
             setButtonState(button, 'sending', payload.metadata.base_model, payload.metadata.type);
 
             const resetSoon = () => setTimeout(() => {
+                button.dataset.cdBusy = '';
                 const freshMeta = buildMetadata();
                 setButtonState(button, 'idle', freshMeta.base_model, freshMeta.type);
             }, 4000);
 
-            discoverServer((base) => {
+            probeServer((base) => {
                 if (!base) {
                     console.error('[Civitai Direct] No ComfyUI with the Civitai-Direct node found on ports', SERVER_PORTS);
+                    button.dataset.cdOffline = '1';
                     setButtonState(button, 'offline', payload.metadata.base_model, payload.metadata.type);
                     resetSoon();
                     return;
                 }
+                button.dataset.cdOffline = '';
 
                 GM_xmlhttpRequest({
                     method: 'POST',
@@ -769,7 +833,7 @@
                         let jobId = null;
                         try { jobId = JSON.parse(response.responseText).job_id; } catch (_) { /* older server */ }
                         if (!jobId) {
-                            setButtonState(button, 'success', payload.metadata.base_model, payload.metadata.type);
+                            setButtonState(button, 'sent', payload.metadata.base_model, payload.metadata.type);
                             resetSoon();
                             return;
                         }
@@ -781,10 +845,15 @@
                                     try { button.textContent = `⬇ ${pct}%`; } catch (_) { /* cosmetic only */ }
                                 }
                             },
-                            (ok, detail) => {
+                            (ok, detail, job) => {
                                 if (ok) {
-                                    console.log('[Civitai Direct] Download finished:', detail);
-                                    setButtonState(button, 'success', payload.metadata.base_model, payload.metadata.type);
+                                    // Either way the file is in the library now --
+                                    // the idle button keeps saying so.
+                                    button.dataset.cdHave = '1';
+                                    button.dataset.cdHavePath = (job && job.path) || '';
+                                    const state = detail === 'already_exists' ? 'exists' : 'success';
+                                    console.log('[Civitai Direct] Download finished:', detail, (job && job.path) || '');
+                                    setButtonState(button, state, payload.metadata.base_model, payload.metadata.type);
                                 } else {
                                     console.error('[Civitai Direct] Download failed:', detail);
                                     setButtonState(button, 'error', payload.metadata.base_model, payload.metadata.type);
@@ -796,6 +865,7 @@
                     onerror(err) {
                         console.error('[Civitai Direct] Could not reach', base, err);
                         serverBase = null; // force re-discovery next click
+                        button.dataset.cdOffline = '1';
                         setButtonState(button, 'offline', payload.metadata.base_model, payload.metadata.type);
                         resetSoon();
                     }
@@ -810,6 +880,78 @@
         }
 
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Server health + library awareness: probe /civitai/health so the button
+    // shows "ComfyUI Offline" before anyone clicks, and ask /civitai/exists
+    // whether this version is already on disk.
+    // ------------------------------------------------------------------
+
+    const HEALTH_INTERVAL_MS = 45000;
+    let healthTimer = null;
+
+    function paintIdleIfCalm(button) {
+        // Never clobber an in-flight click (sending / progress / result flash).
+        if (button.dataset.cdBusy === '1') return;
+        const metadata = buildMetadata();
+        setButtonState(button, 'idle', metadata.base_model, metadata.type);
+    }
+
+    function checkLibrary(button) {
+        if (!serverBase) return;
+        const metadata = buildMetadata();
+        const versionId = metadata.model_version_id;
+        if (!versionId) return;
+        if (button.dataset.cdHaveChecked === String(versionId)) return;
+        button.dataset.cdHaveChecked = String(versionId);
+
+        const params = [
+            `model_version_id=${encodeURIComponent(versionId)}`,
+            metadata.model_id ? `model_id=${encodeURIComponent(metadata.model_id)}` : '',
+            metadata.type ? `type=${encodeURIComponent(metadata.type)}` : '',
+            metadata.base_model ? `base_model=${encodeURIComponent(metadata.base_model)}` : '',
+        ].filter(Boolean).join('&');
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${serverBase}/civitai/exists?${params}`,
+            timeout: 4000,
+            onload(res) {
+                if (res.status !== 200) return;
+                let info = null;
+                try { info = JSON.parse(res.responseText); } catch (_) { return; }
+                if (!info || typeof info.exists !== 'boolean') return;
+                button.dataset.cdHave = info.exists ? '1' : '';
+                button.dataset.cdHavePath = (info.exists && info.path) || '';
+                paintIdleIfCalm(button);
+            },
+            // On error the button just keeps its normal state; offline
+            // handling belongs to the health probe.
+        });
+    }
+
+    function applyServerStatus(online) {
+        const button = document.getElementById(BUTTON_ID);
+        if (!button) return;
+        const flag = online ? '' : '1';
+        const changed = (button.dataset.cdOffline || '') !== flag;
+        button.dataset.cdOffline = flag;
+        if (online) checkLibrary(button);
+        if (changed) paintIdleIfCalm(button);
+    }
+
+    function probeHealth() {
+        if (!isModelPage() || !document.getElementById(BUTTON_ID)) return;
+        probeServer((base) => applyServerStatus(!!base));
+    }
+
+    function startHealthMonitor() {
+        if (healthTimer) return;
+        healthTimer = setInterval(probeHealth, HEALTH_INTERVAL_MS);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') probeHealth();
+        });
     }
 
     function renderButtonIfReady() {
@@ -832,7 +974,10 @@
 
         if (injected) {
             const button = document.getElementById(BUTTON_ID);
-            if (button) button.dataset.renderKey = renderKey;
+            if (button) {
+                button.dataset.renderKey = renderKey;
+                probeHealth();
+            }
         }
     }
 
@@ -940,6 +1085,7 @@
         hookNavigation();
         observePage();
         startRetryLoop();
+        startHealthMonitor();
     }
 
     if (document.readyState === 'loading') {

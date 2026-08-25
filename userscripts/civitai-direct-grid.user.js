@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI (Grid)
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.1.1
+// @version      0.2.0
 // @description  Adds a quick-download button to each model card on Civitai listing/grid pages (ComfyUI-Civitai-Direct).
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -45,6 +45,21 @@
         }
     }
 
+    // Re-validate the cached server (or discover one), so a ComfyUI restart
+    // -- even on the other port -- heals without a second click.
+    function probeServer(callback) {
+        if (!serverBase) { discoverServer(callback); return; }
+        const rediscover = () => { serverBase = null; discoverServer(callback); };
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${serverBase}/civitai/health`,
+            timeout: 1500,
+            onload(res) { if (res.status === 200) callback(serverBase); else rediscover(); },
+            onerror: rediscover,
+            ontimeout: rediscover,
+        });
+    }
+
     function pollJob(base, jobId, onProgress, onDone) {
         const startedAt = Date.now();
         const tick = () => {
@@ -58,8 +73,8 @@
                     let job;
                     try { job = JSON.parse(res.responseText); } catch (_) { job = null; }
                     if (!job) { onDone(false, 'bad status payload'); return; }
-                    if (job.state === 'done' || job.state === 'already_exists') { onDone(true, job.state); return; }
-                    if (job.state === 'error') { onDone(false, job.error || 'download failed'); return; }
+                    if (job.state === 'done' || job.state === 'already_exists') { onDone(true, job.state, job); return; }
+                    if (job.state === 'error') { onDone(false, job.error || 'download failed', job); return; }
                     onProgress(job);
                     setTimeout(tick, 1000);
                 },
@@ -155,20 +170,31 @@
             const wasEa = btn.dataset.cdEa === '1';
             const OK_BG = 'linear-gradient(135deg,#2b8a3e,#37b24d)';
             const ERR_BG = 'linear-gradient(135deg,#c92a2a,#e03131)';
-            const settle = (ok) => {
-                btn.textContent = ok ? '✅' : '❌';
-                btn.style.background = ok ? OK_BG : ERR_BG;
+            const HAVE_BG = 'linear-gradient(135deg,#5f3dc4,#7048e8)';
+            const FACES = {
+                ok: ['✅', OK_BG],
+                have: ['📁', HAVE_BG],
+                err: ['❌', ERR_BG],
+                offline: ['🔌', ERR_BG],
+            };
+            const settle = (kind, title) => {
+                const [face, bg] = FACES[kind] || FACES.err;
+                btn.textContent = face;
+                btn.style.background = bg;
+                if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
                 setTimeout(() => {
+                    btn.title = 'Queue download on local server';
+                    btn.setAttribute('aria-label', btn.title);
                     if (wasEa) { applyEarlyAccessLook(btn); return; }
                     btn.textContent = '⚡';
                     btn.style.background = IDLE_BG;
                 }, 3000);
             };
 
-            discoverServer((base) => {
+            probeServer((base) => {
                 if (!base) {
                     console.error('[Civitai Direct] No ComfyUI with the Civitai-Direct node found on ports', SERVER_PORTS);
-                    settle(false);
+                    settle('offline', `ComfyUI is not running (checked ports ${SERVER_PORTS.join(', ')}). Start ComfyUI with the Civitai-Direct node, then retry.`);
                     return;
                 }
                 GM_xmlhttpRequest({
@@ -177,24 +203,33 @@
                     headers: { 'Content-Type': 'application/json' },
                     data: JSON.stringify({ model_id: info.id, model_version_id: null, model_slug: info.slug }),
                     onload(res) {
-                        if (res.status < 200 || res.status >= 300) { settle(false); return; }
+                        if (res.status < 200 || res.status >= 300) { settle('err'); return; }
                         let jobId = null;
                         try { jobId = JSON.parse(res.responseText).job_id; } catch (_) { /* keep null */ }
-                        if (!jobId) { settle(true); return; }
+                        if (!jobId) { settle('ok'); return; }
                         pollJob(base, jobId,
                             (job) => {
                                 if (job.state === 'downloading' && job.bytes_total) {
                                     btn.textContent = `${Math.floor(job.bytes_done / job.bytes_total * 100)}`;
                                 }
                             },
-                            (ok, detail) => {
-                                if (!ok) console.error('[Civitai Direct] Download failed:', detail);
-                                settle(ok);
+                            (ok, detail, job) => {
+                                if (!ok) {
+                                    console.error('[Civitai Direct] Download failed:', detail);
+                                    settle('err', detail ? `Download failed: ${detail}` : '');
+                                    return;
+                                }
+                                const path = (job && job.path) || '';
+                                if (detail === 'already_exists') {
+                                    settle('have', path ? `Already in your library: ${path}` : 'Already in your library');
+                                } else {
+                                    settle('ok', path ? `Saved: ${path}` : '');
+                                }
                             });
                     },
                     onerror() {
                         serverBase = null; // force re-discovery next click
-                        settle(false);
+                        settle('offline', `Lost the connection to ComfyUI. Start it (ports ${SERVER_PORTS.join(', ')}), then retry.`);
                     }
                 });
             });

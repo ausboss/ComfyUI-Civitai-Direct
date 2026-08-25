@@ -1402,6 +1402,49 @@ async def civitai_status(request):
     return web.json_response(job)
 
 
+def request_user_id(request) -> Optional[str]:
+    """ComfyUI user for this request; None if the request names an unknown user."""
+    user_manager = getattr(PromptServer.instance, "user_manager", None)
+    if user_manager is None:
+        return "default"
+    try:
+        return user_manager.get_request_user_id(request)
+    except KeyError:
+        return None
+
+
+@routes.get("/civitai/exists")
+async def civitai_exists(request):
+    """Read-only library check for the userscripts: is this version already on
+    disk? Sidecar lookup only -- no hashing, no Civitai API calls -- so the
+    model page can label its button the moment it renders."""
+    try:
+        version_id = int(request.query["model_version_id"])
+    except (KeyError, ValueError):
+        return web.json_response({"error": "need a numeric model_version_id"}, status=400)
+
+    model_id_raw = (request.query.get("model_id") or "").strip()
+    meta = {
+        "model_version_id": version_id,
+        "model_id": int(model_id_raw) if model_id_raw.isdigit() else None,
+    }
+
+    model_type = normalize_model_type(request.query.get("type"))
+    base_model = normalize_base_model(request.query.get("base_model"))
+    if model_type == "Workflow":
+        # A wrong user id just means "not found" on a read-only check.
+        search_dir = workflow_metadata_dir(request_user_id(request) or "default", base_model)
+    else:
+        search_dir = choose_target_dir(model_type, base_model, "")
+
+    existing = await asyncio.to_thread(matching_downloaded_version_sidecar, search_dir, meta)
+    return web.json_response({
+        "exists": existing is not None,
+        "path": str(existing) if existing else None,
+        "model_version_id": version_id,
+    })
+
+
 async def _handle_download(request):
     try:
         data = await request.json()
@@ -1430,13 +1473,9 @@ async def _handle_download(request):
             status=400,
         )
 
-    user_id = "default"
-    user_manager = getattr(PromptServer.instance, "user_manager", None)
-    if user_manager is not None:
-        try:
-            user_id = user_manager.get_request_user_id(request)
-        except KeyError:
-            return web.json_response({"error": "unknown ComfyUI user"}, status=403)
+    user_id = request_user_id(request)
+    if user_id is None:
+        return web.json_response({"error": "unknown ComfyUI user"}, status=403)
 
     job_id = next(_job_ids)
     JOBS[job_id] = {
