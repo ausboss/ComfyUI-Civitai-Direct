@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.2.1
+// @version      0.2.2
 // @description  One-click Civitai model downloads straight into your ComfyUI model folders, via the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
 // @match        *://civitai.red/*
 // @match        *://www.civitai.red/*
 // @connect      127.0.0.1
+// @connect      localhost
 // @grant        GM_xmlhttpRequest
 // @downloadURL  https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct.user.js
 // @updateURL    https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct.user.js

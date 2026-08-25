@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI (Grid)
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.2.0
+// @version      0.2.1
 // @description  Adds a quick-download button to each model card on Civitai listing/grid pages (ComfyUI-Civitai-Direct).
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -12,6 +12,7 @@
 // @exclude      *://civitai.red/models/*
 // @exclude      *://www.civitai.red/models/*
 // @connect      127.0.0.1
+// @connect      localhost
 // @grant        GM_xmlhttpRequest
 // @downloadURL  https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct-grid.user.js
 // @updateURL    https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct-grid.user.js

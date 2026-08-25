@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Civitai Direct Images for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.2.0
+// @version      0.2.1
 // @description  Outlines Civitai images by available generation data (red = none, blue = prompt, green = ComfyUI nodes), adds hover buttons to copy the prompt/info/nodes, and saves image + metadata via the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
 // @match        *://civitai.red/*
 // @match        *://www.civitai.red/*
 // @connect      127.0.0.1
+// @connect      localhost
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @downloadURL  https://raw.githubusercontent.com/ausboss/ComfyUI-Civitai-Direct/main/userscripts/civitai-direct-images.user.js
@@ -43,7 +44,6 @@
         }
     }
 
-    // Poll a queued job until it reaches a terminal state.
     // Re-validate the cached server (or discover one), so a ComfyUI restart
     // -- even on the other port -- heals without a second click.
     function probeServer(callback) {
@@ -59,6 +59,7 @@
         });
     }
 
+    // Poll a queued job until it reaches a terminal state.
     function pollJob(base, jobId, onDone) {
         const startedAt = Date.now();
         const tick = () => {
