@@ -14,6 +14,8 @@ Routes (this package defines no graph nodes):
     POST /civitai/download-image  {"image_id": ...} and/or {"image_url": ..., "page_url": ...}
     GET  /civitai/status?id=N     state/progress of one download job
     GET  /civitai/jobs            every job this session
+    GET  /civitai/exists?model_version_id=N   is this version already on disk
+                                  (&model_id=&type=&base_model=&air= sharpen the answer)
 
 Settings come from the environment or a .env file next to this __init__.py
 (NAME=value lines), re-read on every download so changes apply without a
@@ -25,7 +27,15 @@ ComfyUI restart:
                           Default: <your Pictures folder>/Civitai
     CIVITAI_WORKFLOW_DIR  where Workflow-type models are saved.
                           Default: ComfyUI's own workflow library
-                          (user/<user>/workflows/civitai-direct/<base model>) Note: an API key does NOT unlock Early Access
+                          (user/<user>/workflows/civitai-direct/<base model>)
+    CIVITAI_SIDECARS      "info" (default): write the ecosystem-standard
+                          <stem>.civitai.info next to each model.
+                          "full": also write this tool's <file>.json + .md notes.
+    CIVITAI_PREVIEWS      "sfw" (default): save the version's tamest image as
+                          <stem>.preview.<ext>, skipping models with nothing
+                          at PG/PG13. "any": Civitai's cover image. "off".
+
+Note: an API key does NOT unlock Early Access
 versions -- those need the early-access purchase/subscription on the account.
 
 MIT License. Sibling project (standalone server + image/workflow tools):

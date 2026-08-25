@@ -2,6 +2,16 @@
 
 All notable changes to ComfyUI-Civitai-Direct are documented here.
 
+## Unreleased
+
+- **Switched the default model sidecar to the ecosystem's `<stem>.civitai.info`** — the verbatim Civitai model-version record that SD-WebUI Civitai Helper, LoRA-loader Civitai panels, and ComfyUI-Image-Saver already read for trigger words and offline model info. The previous `<file>.json` + `<file>.md` pair remains available via `CIVITAI_SIDECARS=full` (workflows keep it always). Duplicate detection reads both dialects — including `.civitai.info` files written by *other* tools — and backfills the new sidecar when an old download is re-requested, so existing libraries converge without re-downloading.
+- **Added preview images**: `<stem>.preview.<ext>` next to every model (the convention A1111/Forge, Civitai Helper, and Lora Manager display), named by the file's actual bytes since Civitai's CDN serves PNGs from `.jpeg` URLs. Default mode `sfw` picks the version's tamest image and skips models with nothing at PG/PG13; `CIVITAI_PREVIEWS=any` uses Civitai's cover choice, `off` disables.
+- **Renamed base-model folders to lowercase AIR-style slugs** (`sd15`, `sdxl`, `pony`, `flux1`, `krea2`, `wan-video-22-t2v-a14b`, ...): no more spaces or dots in folder names. Unknown families take the ecosystem token from the version's AIR urn, so brand-new base models sort correctly with no code change. Old folder names keep working — the dedupe scan now covers the whole type folder, so nothing is downloaded twice after the rename.
+- **The buttons now know things before you click**: the model-page button checks the new `GET /civitai/exists` route on load and renders violet "📁 In Your Library" (tooltip shows the file's path) when you already have the version, and red "🔌 ComfyUI Offline" when no server answers (re-probed every ~45 s and on click). `already_exists` results show as "already in your library" instead of masquerading as a fresh download, across all three userscripts. Clicks re-validate a cached server, so a ComfyUI restart — even on the other probe port — heals without a second click.
+- **Downloads are SHA256-verified** against Civitai's published hash; a mismatched transfer is quarantined as `.corrupt` and reported as a readable job error instead of posing as a model.
+- **Added folder routing for newer Civitai types**: CLIP → `text_encoders/`, CLIPVision → `clip_vision/`, UNet → `diffusion_models/`, MotionModule → `animatediff_models/`, Detection → `ultralytics/` (the latter two resolve through the registering node pack's folder when installed).
+- `/civitai/health` reports the active `sidecars` and `previews` modes; userscripts gained `@connect localhost` for setups that address the server by hostname.
+
 ## 0.1.0
 
 - Added the `/civitai/*` routes on ComfyUI's own server: `health`, `download`, `download-image`, `status`, `jobs`.

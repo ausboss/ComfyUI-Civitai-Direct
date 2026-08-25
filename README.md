@@ -8,7 +8,7 @@
   <p>Part of the <a href="https://github.com/ausboss/ComfyUI-AusBoss">AusBoss</a> node family.</p>
 </div>
 
-A ComfyUI custom node + Tampermonkey userscripts. No separate server, no Python setup, no config wizard — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/SDXL/`, `checkpoints/SD 1.5/`, `diffusion_models/Flux.1 Dev/`, ...), workflow ZIPs are safely extracted into ComfyUI's workflow library, and gallery images save into your Pictures folder with their prompt and generation metadata. Downloads include metadata sidecars, duplicate detection, and live progress on the button.
+A ComfyUI custom node + Tampermonkey userscripts. No separate server, no Python setup, no config wizard, no paywall or license key — destination folders come straight from ComfyUI's own `folder_paths` (your `extra_model_paths.yaml` is honored automatically). Models are sorted by type and base model (`loras/sdxl/`, `checkpoints/sd15/`, `diffusion_models/flux1/`, ...), workflow ZIPs are safely extracted into ComfyUI's workflow library, and gallery images save into your Pictures folder with their prompt and generation metadata. Every model gets the ecosystem-standard `.civitai.info` sidecar plus a preview image, downloads are SHA256-verified, duplicates are detected instead of re-downloaded, and the button shows live progress — including "already in your library" and "ComfyUI offline" before you even click.
 
 <!-- TODO: GIF of the ⚡ button on a Civitai model page -->
 
@@ -51,28 +51,39 @@ The two files are re-read on every download — add the key and click ⚡ again,
 | Checkpoint (Flux, Wan, LTX, other diffusion models) | `diffusion_models/<base model>/` |
 | LoRA / LyCORIS / DoRA | `loras/<base model>/` |
 | Embedding | `embeddings/<base model>/` |
-| VAE / ControlNet / Upscaler / Text Encoder / Hypernetwork | matching folder, `<base model>/` subfolder |
+| VAE / ControlNet / Upscaler / Text Encoder / CLIP / Hypernetwork | matching folder, `<base model>/` subfolder |
+| CLIPVision / UNet / MotionModule / Detection | `clip_vision/`, `diffusion_models/`, `animatediff_models/`, `ultralytics/` |
 | Workflow / Workflows | `user/<user>/workflows/civitai-direct/<base model>/<workflow>/` |
 | Gallery images | `<your Pictures folder>/Civitai/` |
 
-Every model gets a `<file>.json` sidecar (full Civitai metadata) and a `<file>.md` notes file (trigger words, description, source links). New files show up in ComfyUI's loaders immediately — no restart. Images save as the *original* upload (PNG originals keep their embedded generation metadata) plus a `.json` sidecar, the prompt as a `.txt`, and — when the image carries a ComfyUI graph — a ready-to-load `.workflow.json`.
+Base-model folders use lowercase, space-free slugs aligned with Civitai's own AIR family tokens — `sd15`, `sdxl`, `pony`, `illustrious`, `flux1`, `krea2`, `wan-video-22-t2v-a14b` — the spelling shared workflows most often expect. Families the mapping has never heard of get their slug from the version's AIR urn, so new base models sort themselves correctly on day one.
 
-**Custom folders.** Two optional settings override the image and workflow destinations — set them as environment variables or in the same `.env` file as the API key (re-read per download, no restart needed):
+**Metadata that other tools read too.** Every model gets `<stem>.civitai.info` — the verbatim Civitai model-version record, the same file SD-WebUI's Civitai Helper, ComfyUI LoRA loaders with Civitai panels, and ComfyUI-Image-Saver use for trigger words and offline model info — plus `<stem>.preview.<ext>`, the preview-image convention A1111/Forge and Lora Manager display (your own `<stem>.png` always outranks it, so replacing a preview is just dropping a file next to the model). By default the tamest available image is chosen and models with nothing at PG/PG13 get no preview; see the settings below. Since the sidecar is written at download time, your library keeps its metadata even if the model is later removed from Civitai. Prefer this tool's richer records as well? `CIVITAI_SIDECARS=full` additionally writes the `<file>.json` + `<file>.md` pair from earlier releases. New files show up in ComfyUI's loaders immediately — no restart.
+
+Images save as the *original* upload (PNG originals keep their embedded generation metadata) plus a `.json` sidecar, the prompt as a `.txt`, and — when the image carries a ComfyUI graph — a ready-to-load `.workflow.json`.
+
+**Optional settings** — environment variables or the same `.env` file as the API key (re-read per download, no restart needed):
 
 ```
-CIVITAI_IMAGE_DIR=D:\my\image\folder
-CIVITAI_WORKFLOW_DIR=D:\my\workflow\folder
+CIVITAI_IMAGE_DIR=D:\my\image\folder      # gallery images (default: Pictures/Civitai)
+CIVITAI_WORKFLOW_DIR=D:\my\workflow\folder # workflows (default: ComfyUI's workflow library)
+CIVITAI_SIDECARS=full                      # also write the <file>.json + .md pair (default: info)
+CIVITAI_PREVIEWS=any                       # sfw (default) | any (Civitai's cover) | off
 ```
 
-Unset, images go to your OS Pictures folder (`Civitai/` subfolder; relocated/OneDrive Pictures folders and Linux XDG dirs are honored) and workflows go to ComfyUI's own workflow library. `/civitai/health` shows the resolved `images_dir` and `workflows_dir`.
+Relocated/OneDrive Pictures folders and Linux XDG dirs are honored. `/civitai/health` shows the resolved `images_dir`, `workflows_dir` and the active `sidecars`/`previews` modes.
 
-**Duplicates are skipped, not copied.** Two checks run before any download: a version you already grabbed through this tool is recognized by its sidecar, and a same-named file from *anywhere else* (manual download, another tool) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Both checks follow your reorganizing: a model you moved into a subfolder — or a different base-model folder of the same type — is still recognized, with or without its sidecars. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten.
+**Duplicates are skipped, not copied.** Two checks run before any download: a version already on disk is recognized by its sidecar — this tool's, or a `.civitai.info` written by *any* other tool — and a same-named file from anywhere else (manual download, another downloader) is SHA256-verified against Civitai's published hash — if the bytes match, the node adopts it, writes the missing sidecars, and reports `already_exists`. Both checks follow your reorganizing: a model you moved into a subfolder — or a different base-model folder of the same type — is still recognized, with or without its sidecars. Only a same-named file with *different* content (Civitai filenames collide across versions constantly) is saved with a ` (1)` suffix, so nothing is ever overwritten. Fresh downloads are SHA256-verified too: a transfer that doesn't match Civitai's published hash is quarantined as `.corrupt` and reported as an error instead of posing as a model.
+
+**What the button tells you.** ⚡ teal — ready. 📁 violet — this version is already in your library (the tooltip names the file; checked automatically when the page loads). 🔌 red — ComfyUI isn't running; start it and click to retry. ⏳/⬇ % — sending / downloading. ✅ green — saved. ⚡ yellow — Early Access (see above).
 
 If you run ComfyUI on a port other than 8188/8189, add it to `SERVER_PORTS` at the top of the userscript.
 
 ## Troubleshooting
 
-- **Button doesn't appear** — is ComfyUI running? Open `http://127.0.0.1:8188/civitai/health` (your port) — you should see JSON. Check Tampermonkey is enabled for civitai.com.
+- **Button doesn't appear at all (Chrome)** — Tampermonkey 5.x needs Chrome's **Developer mode** (chrome://extensions) or the **Allow User Scripts** toggle (Chrome 138+) before any userscript runs. This is the #1 cause.
+- **Button shows 🔌 ComfyUI Offline** — is ComfyUI running? Open `http://127.0.0.1:8188/civitai/health` (your port) — you should see JSON. The button re-checks every ~45 s and whenever you click it.
+- **Button doesn't appear on the page** — check Tampermonkey is enabled for civitai.com (and civitai.red — the scripts run on both).
 - **"requires a logged-in account"** — add an API key (see above), then check `/civitai/health` reports it loaded.
 - **"Early Access"** — no key fixes this one; the version is still supporter-only on Civitai's side. Wait out the window or subscribe to the creator.
 - **Wrong folder?** — open an issue with the model link; type/base-model mappings live in `__init__.py` and are easy to extend.

@@ -49,9 +49,18 @@ Pictures folder and ComfyUI's user workflow library.
 
 ## Compatibility contracts (never break these)
 
-- The sidecar schema `ausboss-civitai-model-sidecar-v1`: key names and
-  structure are shared with easy-civitai-downloader's backfill/scrub tools
-  and duplicate detection. Additive changes only; renames need a new schema id.
+- `<stem>.civitai.info` (the default model sidecar) is the **verbatim**
+  Civitai model-version API payload — the shared format of SD-WebUI Civitai
+  Helper, Lora Manager panels, and ComfyUI-Image-Saver. Never reshape,
+  rename, or inject keys into it (top-level backfill of `modelId`/`model`
+  when the API omitted them is the one allowed exception). Filename is
+  always `<model stem>.civitai.info`, previews `<model stem>.preview.<ext>`.
+- The sidecar schema `ausboss-civitai-model-sidecar-v1` (the `<file>.json` +
+  `.md` pair, now written for workflows always and for models under
+  `CIVITAI_SIDECARS=full`): key names and structure are shared with
+  easy-civitai-downloader's backfill/scrub tools and duplicate detection.
+  Additive changes only; renames need a new schema id. Duplicate detection
+  must keep reading BOTH dialects (.civitai.info and the v1 json).
 - Same deal for the image sidecar schema `ausboss-civitai-image-sidecar-v1`
   and the `/civitai/download-image` payload
   (`{image_id, image_url, page_url, prompt, filename, generation_data}`).
@@ -98,6 +107,8 @@ node --check userscripts/civitai-direct-grid.user.js
 ```
 
 A change is validated when: a small download lands in the right
-`<type>/<base model>/` folder with `.json` + `.md` sidecars, re-requesting the
+`<type>/<base-model-slug>/` folder (lowercase, space-free, e.g. `loras/sd15/`)
+with a `.civitai.info` sidecar and a `.preview.<ext>` image, re-requesting the
 same version returns `already_exists`, and a bad request produces a readable
-`error` in the job record rather than a stack trace in the console.
+`error` in the job record rather than a stack trace in the console. With
+`CIVITAI_SIDECARS=full`, the `.json` + `.md` pair appears as well.
