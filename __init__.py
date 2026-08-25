@@ -814,6 +814,38 @@ async def resolve_model(
 # Sidecars (schema-compatible with easy-civitai-downloader)
 # ============================================================
 
+def sidecar_mode() -> str:
+    """Sidecar style for model downloads, from CIVITAI_SIDECARS (env/.env):
+    "info" (default) writes the ecosystem-standard <stem>.civitai.info that
+    Civitai Helper, ComfyUI-Lora-Manager & co read; "full" additionally writes
+    this tool's own <file>.json + <file>.md notes."""
+    value = get_setting("CIVITAI_SIDECARS").strip().lower()
+    return value if value in {"info", "full"} else "info"
+
+
+def civitai_info_path(model_path: Path) -> Path:
+    """<stem>.civitai.info next to the model file (model.safetensors ->
+    model.civitai.info) -- the sidecar name the wider ecosystem shares."""
+    return model_path.with_suffix(".civitai.info")
+
+
+def build_civitai_info(
+    model_json: dict[str, Any], version_json: dict[str, Any], meta: dict[str, Any]
+) -> dict[str, Any]:
+    """The .civitai.info payload: the model-version API response verbatim,
+    with the keys the model endpoint's embedded copy can drop backfilled so
+    the file matches what /api/v1/model-versions/{id} itself serves."""
+    info = dict(version_json)
+    info.setdefault("modelId", meta.get("model_id"))
+    info.setdefault("model", {
+        "name": model_json.get("name"),
+        "type": model_json.get("type"),
+        "nsfw": model_json.get("nsfw"),
+        "poi": model_json.get("poi"),
+    })
+    return info
+
+
 def redact_civitai_token(text: Any) -> str:
     return re.sub(r"([?&]token=)[^&\s]+", r"\1REDACTED", str(text or ""))
 
@@ -1003,13 +1035,41 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+# Extensions a .civitai.info sidecar's model file can carry, most likely first.
+_MODEL_FILE_SUFFIXES = (
+    ".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx", ".zip",
+)
+
+
 def matching_downloaded_version_sidecar(target_dir: Path, meta: dict[str, Any]) -> Optional[Path]:
-    """Existing model file for this exact version, found via its sidecar."""
+    """Existing model file for this exact version, found via its sidecar.
+
+    Reads both sidecar dialects: .civitai.info (ours and any other tool's --
+    a file fetched by Civitai Helper or Lora Manager counts as already
+    downloaded) and this tool's <file>.json records."""
     if not meta.get("model_version_id") or not target_dir.exists():
         return None
 
     requested_version = str(meta["model_version_id"])
     requested_model = str(meta["model_id"]) if meta.get("model_id") else None
+
+    for info_path in target_dir.rglob("*.civitai.info"):
+        try:
+            payload = json.loads(info_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(payload.get("id")) != requested_version:
+            continue
+        info_model_id = payload.get("modelId")
+        if requested_model and info_model_id and str(info_model_id) != requested_model:
+            continue
+        # The model file shares the sidecar's stem; probe extensions instead
+        # of globbing -- model names can contain glob metacharacters.
+        stem = info_path.name[: -len(".civitai.info")]
+        for suffix in _MODEL_FILE_SUFFIXES:
+            candidate = info_path.parent / (stem + suffix)
+            if candidate.exists():
+                return candidate
 
     for sidecar_path in target_dir.rglob("*.json"):
         if sidecar_path.name.endswith((".failed.json", ".failed.civitai.json")):
@@ -1744,16 +1804,20 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
 
             def adopt_existing(path: Path) -> None:
                 job.update(state="already_exists", path=str(path))
-                json_path = path.with_suffix(path.suffix + ".json")
-                if not json_path.exists():
-                    sidecar = build_sidecar_json(
-                        meta, {"model": model_json, "model_version": version_json},
-                        path, download_url, sha_cache.get(str(path)),
-                        path.stat().st_size, "already_exists",
-                    )
-                    write_json(json_path, sidecar)
-                    if SAVE_MARKDOWN_NOTES:
-                        write_markdown(path.with_suffix(path.suffix + ".md"), sidecar)
+                info_path = civitai_info_path(path)
+                if not info_path.exists():
+                    write_json(info_path, build_civitai_info(model_json, version_json, meta))
+                if sidecar_mode() == "full":
+                    json_path = path.with_suffix(path.suffix + ".json")
+                    if not json_path.exists():
+                        sidecar = build_sidecar_json(
+                            meta, {"model": model_json, "model_version": version_json},
+                            path, download_url, sha_cache.get(str(path)),
+                            path.stat().st_size, "already_exists",
+                        )
+                        write_json(json_path, sidecar)
+                        if SAVE_MARKDOWN_NOTES:
+                            write_markdown(path.with_suffix(path.suffix + ".md"), sidecar)
                 log.info("civitai-direct: job %s: identical file already on disk, adopted -> %s",
                          job_id, console_safe(path))
 
@@ -1895,18 +1959,30 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 if workflow_download and metadata_dir is not None
                 else dest.with_suffix(dest.suffix + ".md")
             )
-            sidecar = build_sidecar_json(
-                meta, api_raw, artifact_path, download_url, file_sha256, file_size, "downloaded",
-                json_file_path=json_path,
-                markdown_file_path=markdown_path,
-            )
-            write_json(json_path, sidecar)
-            if SAVE_MARKDOWN_NOTES:
-                write_markdown(markdown_path, sidecar)
+            sidecars = []
+            if not workflow_download:
+                write_json(civitai_info_path(artifact_path),
+                           build_civitai_info(model_json, version_json, meta))
+                sidecars.append(".civitai.info")
+            # Workflows always keep the v1 json+md sidecars: they are the
+            # workflow dedupe record, and .civitai.info is a model-file
+            # convention other tools would not look for on a workflow.
+            if workflow_download or sidecar_mode() == "full":
+                sidecar = build_sidecar_json(
+                    meta, api_raw, artifact_path, download_url, file_sha256, file_size,
+                    "downloaded",
+                    json_file_path=json_path,
+                    markdown_file_path=markdown_path,
+                )
+                write_json(json_path, sidecar)
+                sidecars.append(".json")
+                if SAVE_MARKDOWN_NOTES:
+                    write_markdown(markdown_path, sidecar)
+                    sidecars.append(".md")
 
             job["state"] = "done"
-            log.info("civitai-direct: job %s: done -> %s (+ .json/.md sidecars)",
-                     job_id, console_safe(artifact_path))
+            log.info("civitai-direct: job %s: done -> %s (+ %s)",
+                     job_id, console_safe(artifact_path), "/".join(sidecars) or "no sidecars")
     except Exception as exc:  # noqa: BLE001 -- the job record is the error channel
         # Redact before storing: aiohttp errors embed the request URL, which
         # now carries ?token=, and the job record reaches the browser console.
