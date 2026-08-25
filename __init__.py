@@ -246,6 +246,17 @@ def normalize_model_type(value: Optional[str]) -> str:
         return "Embedding"
     if compact in {"textencoder", "textencoders"}:
         return "TextEncoder"
+    # Civitai's "CLIP" type is CLIP-L/G text encoders, not vision towers.
+    if compact == "clip":
+        return "TextEncoder"
+    if compact == "clipvision":
+        return "CLIPVision"
+    if compact == "unet":
+        return "Unet"
+    if compact in {"motionmodule", "motionmodules"}:
+        return "MotionModule"
+    if compact == "detection":
+        return "Detection"
     if value in {"hypernetwork", "hypernet"}:
         return "Hypernetwork"
     if value in {"controlnet", "control net"}:
@@ -328,7 +339,9 @@ def normalize_base_model(value: Optional[str], air: Optional[str] = None) -> str
 # "load diffusion model" and belong in diffusion_models/.
 _STABLE_DIFFUSION_BASES = {"base-model", "illustrious", "anima", "sdxl", "sd15", "pony"}
 
-# Civitai model type -> folder_paths folder name
+# Civitai model type -> folder_paths folder name. Names that only a custom
+# node pack registers (animatediff_models, ultralytics) resolve through the
+# pack's registration when installed and fall back to models/<name>/.
 _TYPE_TO_FOLDER_NAME: dict[str, str] = {
     "Lora": "loras",
     "VAE": "vae",
@@ -337,6 +350,10 @@ _TYPE_TO_FOLDER_NAME: dict[str, str] = {
     "Hypernetwork": "hypernetworks",
     "Upscaler": "upscale_models",
     "TextEncoder": "text_encoders",
+    "CLIPVision": "clip_vision",
+    "Unet": "diffusion_models",
+    "MotionModule": "animatediff_models",
+    "Detection": "ultralytics",
 }
 
 # Types folder_paths has no entry for; they live under models/<dirname>/.
