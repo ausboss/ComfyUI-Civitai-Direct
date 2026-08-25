@@ -1821,6 +1821,13 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                     matching_downloaded_version_sidecar, target_dir.parent, meta)
             if existing:
                 job.update(state="already_exists", path=str(existing))
+                # Models found via a legacy .json sidecar gain the ecosystem's
+                # .civitai.info too, so old libraries converge on the format
+                # the loader panels read.
+                if not workflow_download and existing.is_file():
+                    info_path = civitai_info_path(existing)
+                    if not info_path.exists():
+                        write_json(info_path, build_civitai_info(model_json, version_json, meta))
                 log.info("civitai-direct: job %s: already downloaded -> %s",
                          job_id, console_safe(existing))
                 return
