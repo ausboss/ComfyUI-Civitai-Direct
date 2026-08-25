@@ -920,6 +920,23 @@ def preview_path_for(model_path: Path, image_url: str) -> Path:
     return model_path.with_suffix(".preview" + ext)
 
 
+def image_suffix_from_magic(path: Path) -> Optional[str]:
+    """Extension for what the file actually is. Civitai's CDN routinely
+    serves PNG originals from URLs ending in .jpeg -- name by the bytes."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG"):
+        return ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpeg"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
 async def save_preview_image(
     session: aiohttp.ClientSession,
     version_json: dict[str, Any],
@@ -931,8 +948,9 @@ async def save_preview_image(
     if not entry:
         return False
     dest = preview_path_for(model_path, entry["url"])
-    if dest.exists():
-        return True
+    for suffix in (".png", ".jpg", ".jpeg", ".webp"):
+        if model_path.with_suffix(".preview" + suffix).exists():
+            return True
     part = dest.parent / (dest.name + ".part")
     try:
         async with session.get(entry["url"]) as resp:
@@ -940,6 +958,9 @@ async def save_preview_image(
             with part.open("wb") as fh:
                 async for chunk in resp.content.iter_chunked(CHUNK):
                     fh.write(chunk)
+        true_suffix = image_suffix_from_magic(part)
+        if true_suffix:
+            dest = model_path.with_suffix(".preview" + true_suffix)
         part.replace(dest)
         return True
     except Exception as exc:  # noqa: BLE001 -- previews are decoration, not data
