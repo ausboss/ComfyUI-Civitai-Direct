@@ -2052,6 +2052,19 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
             file_sha256 = await calculate_sha256(dest)
             file_size = dest.stat().st_size
 
+            # The post-download hash doubles as an integrity check against the
+            # hash Civitai publishes -- a mismatch is a truncated or corrupted
+            # transfer and must not sit on disk looking like a model.
+            if api_sha256 and file_sha256.lower() != api_sha256:
+                quarantined = dest.parent / (dest.name + ".corrupt")
+                dest.replace(quarantined)
+                raise RuntimeError(
+                    f"SHA256 mismatch: Civitai publishes {api_sha256} but the downloaded "
+                    f"bytes hash to {file_sha256.lower()}. The file was kept as "
+                    f"{quarantined.name} instead of a trusted model file -- try the "
+                    "download again."
+                )
+
             artifact_path = dest
             if workflow_download and dest.suffix.lower() == ".zip":
                 if workflow_artifact is None:
