@@ -869,6 +869,72 @@ def build_civitai_info(
     return info
 
 
+def previews_mode() -> str:
+    """Preview-image style, from CIVITAI_PREVIEWS (env/.env): "sfw" (default)
+    saves the tamest image and skips models with nothing PG/PG13, "any"
+    trusts Civitai's cover choice, "off" disables preview downloads."""
+    value = get_setting("CIVITAI_PREVIEWS").strip().lower()
+    return value if value in {"sfw", "any", "off"} else "sfw"
+
+
+def pick_preview_image(version_json: dict[str, Any]) -> Optional[dict[str, Any]]:
+    if previews_mode() == "off":
+        return None
+    images = [
+        entry for entry in (version_json.get("images") or [])
+        if isinstance(entry, dict) and (entry.get("type") or "image") == "image" and entry.get("url")
+    ]
+    if not images:
+        return None
+    if previews_mode() == "any":
+        return images[0]
+    # Per-image nsfwLevel is a single browsing level: 1 PG, 2 PG13, 4 R, ...
+    tamest = min(images, key=lambda entry: entry.get("nsfwLevel") or 99)
+    return tamest if (tamest.get("nsfwLevel") or 99) <= 2 else None
+
+
+def preview_path_for(model_path: Path, image_url: str) -> Path:
+    """<stem>.preview.<ext> -- the writer convention A1111/Forge, Civitai
+    Helper and Lora Manager all read, leaving <stem>.<ext> free for a
+    preview the user makes themselves (which those tools prefer)."""
+    ext = Path(urlparse(image_url).path).suffix.lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+        ext = ".jpeg"
+    return model_path.with_suffix(".preview" + ext)
+
+
+async def save_preview_image(
+    session: aiohttp.ClientSession,
+    version_json: dict[str, Any],
+    model_path: Path,
+    job_id: int,
+) -> bool:
+    """Best-effort preview download next to the model. Never fails the job."""
+    entry = pick_preview_image(version_json)
+    if not entry:
+        return False
+    dest = preview_path_for(model_path, entry["url"])
+    if dest.exists():
+        return True
+    part = dest.parent / (dest.name + ".part")
+    try:
+        async with session.get(entry["url"]) as resp:
+            resp.raise_for_status()
+            with part.open("wb") as fh:
+                async for chunk in resp.content.iter_chunked(CHUNK):
+                    fh.write(chunk)
+        part.replace(dest)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- previews are decoration, not data
+        log.info("civitai-direct: job %s: preview image failed (%s)",
+                 job_id, console_safe(redact_civitai_token(exc)))
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
 def redact_civitai_token(text: Any) -> str:
     return re.sub(r"([?&]token=)[^&\s]+", r"\1REDACTED", str(text or ""))
 
@@ -1473,6 +1539,8 @@ async def civitai_health(request):
         "version": NODE_VERSION,
         "has_civitai_api_key": bool(key),
         "api_key_source": source,
+        "sidecars": sidecar_mode(),
+        "previews": previews_mode(),
         "dirs": dirs,
         "images_dir": str(images_target_dir()),
         "workflows_dir": workflows_dir,
@@ -1822,12 +1890,13 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
             if existing:
                 job.update(state="already_exists", path=str(existing))
                 # Models found via a legacy .json sidecar gain the ecosystem's
-                # .civitai.info too, so old libraries converge on the format
-                # the loader panels read.
+                # .civitai.info (and a preview) too, so old libraries converge
+                # on the format the loader panels read.
                 if not workflow_download and existing.is_file():
                     info_path = civitai_info_path(existing)
                     if not info_path.exists():
                         write_json(info_path, build_civitai_info(model_json, version_json, meta))
+                    await save_preview_image(session, version_json, existing, job_id)
                 log.info("civitai-direct: job %s: already downloaded -> %s",
                          job_id, console_safe(existing))
                 return
@@ -2013,6 +2082,8 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 write_json(civitai_info_path(artifact_path),
                            build_civitai_info(model_json, version_json, meta))
                 sidecars.append(".civitai.info")
+                if await save_preview_image(session, version_json, artifact_path, job_id):
+                    sidecars.append(".preview")
             # Workflows always keep the v1 json+md sidecars: they are the
             # workflow dedupe record, and .civitai.info is a model-file
             # convention other tools would not look for on a workflow.
