@@ -261,49 +261,72 @@ def normalize_model_type(value: Optional[str]) -> str:
     return safe_folder(value or "Other", "Other")
 
 
-def normalize_base_model(value: Optional[str]) -> str:
+def air_ecosystem(air: Optional[str]) -> Optional[str]:
+    """Ecosystem token out of an AIR urn (urn:air:krea2:lora:civitai:1@2 ->
+    "krea2") -- Civitai's own canonical, lowercase, space-free family slug."""
+    if not air:
+        return None
+    match = re.match(r"^(?:urn:)?(?:air:)?([a-z0-9][a-z0-9.-]*):", str(air).strip().lower())
+    return match.group(1) if match else None
+
+
+def slugify_folder(value: str) -> str:
+    """Lowercase, space-free folder slug: "Wan Video 2.2 I2V-A14B" ->
+    "wan-video-22-i2v-a14b". Dots vanish first so version numbers read like
+    the community's folder names (2.2 -> 22, Flux.1 -> flux1)."""
+    value = html.unescape(value or "").strip().lower().replace(".", "")
+    return re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+
+
+def normalize_base_model(value: Optional[str], air: Optional[str] = None) -> str:
+    """Folder slug for a Civitai base model: lowercase, no spaces, AIR-style.
+    Known families map explicitly (keeping distinctions AIR drops, like
+    flux1-dev vs flux1-schnell); anything else uses the version's own AIR
+    ecosystem token, then a generic slug of the name."""
     value = (value or "").strip()
     compact = re.sub(r"[\s._-]+", "", value.lower())
 
     if "zimageturbo" in compact:
-        return "ZImageTurbo"
+        return "zimage-turbo"
     if "zimage" in compact:
-        return "ZImage"
+        return "zimage"
     if "flux2klein9b" in compact:
-        return "Flux.2 Klein 9B"
-    if "flux1dev" in compact:
-        return "Flux.1 Dev"
-    if "flux1schnell" in compact:
-        return "Flux.1 Schnell"
-    if "flux.1" in value.lower():
-        return "Flux.1"
+        return "flux2-klein-9b"
+    # One flux1 family: Civitai's API says "Flux.1 D" / "Flux.1 S", AIR says
+    # flux1 for all of them, and dev/schnell LoRAs interchange anyway.
+    if "flux1" in compact or "flux.1" in value.lower():
+        return "flux1"
     if "illustrious" in compact:
-        return "Illustrious"
+        return "illustrious"
     if "anima" in compact:
-        return "Anima"
+        return "anima"
     if "sdxl" in compact:
-        return "SDXL"
+        return "sdxl"
     if "sd15" in compact or "sd1.5" in value.lower():
-        return "SD 1.5"
+        return "sd15"
     if "pony" in compact:
-        return "Pony"
+        return "pony"
     if "sd35large" in compact or "sd3.5large" in value.lower():
-        return "SD 3.5 Large"
+        return "sd35-large"
     if "sd35medium" in compact or "sd3.5medium" in value.lower():
-        return "SD 3.5 Medium"
+        return "sd35-medium"
     if "sd3" in compact:
-        return "SD 3"
+        return "sd3"
     if "sd21" in compact or "sd2.1" in value.lower():
-        return "SD 2.1"
+        return "sd21"
     if "sd14" in compact or "sd1.4" in value.lower():
-        return "SD 1.4"
-    return safe_folder(value or "UnknownBaseModel", "UnknownBaseModel")
+        return "sd14"
+
+    ecosystem = air_ecosystem(air)
+    if ecosystem and ecosystem != "other":
+        return ecosystem
+    return slugify_folder(value) or "unknown"
 
 
 # SD-family checkpoints load through CheckpointLoaderSimple and belong in
 # checkpoints/; newer diffusion models (Flux, Wan, LTX, ...) load through
 # "load diffusion model" and belong in diffusion_models/.
-_STABLE_DIFFUSION_BASES = {"Base Model", "Illustrious", "Anima", "SDXL", "SD 1.5", "Pony"}
+_STABLE_DIFFUSION_BASES = {"base-model", "illustrious", "anima", "sdxl", "sd15", "pony"}
 
 # Civitai model type -> folder_paths folder name
 _TYPE_TO_FOLDER_NAME: dict[str, str] = {
@@ -793,7 +816,7 @@ async def resolve_model(
         "version_name": version_json.get("name"),
         "creator": (model_json.get("creator") or {}).get("username"),
         "type": model_json.get("type"),
-        "base_model": normalize_base_model(version_json.get("baseModel")),
+        "base_model": normalize_base_model(version_json.get("baseModel"), version_json.get("air")),
         "published": version_json.get("publishedAt"),
         "hash_type": hash_type,
         "hash_value": hash_value,
@@ -1040,6 +1063,10 @@ _MODEL_FILE_SUFFIXES = (
     ".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx", ".zip",
 )
 
+# Sidecar scans cover whole type folders, which can hold arbitrary JSON from
+# other tools -- don't slurp anything that clearly isn't a sidecar.
+_MAX_SIDECAR_BYTES = 8 * 1024 * 1024
+
 
 def matching_downloaded_version_sidecar(target_dir: Path, meta: dict[str, Any]) -> Optional[Path]:
     """Existing model file for this exact version, found via its sidecar.
@@ -1055,6 +1082,8 @@ def matching_downloaded_version_sidecar(target_dir: Path, meta: dict[str, Any]) 
 
     for info_path in target_dir.rglob("*.civitai.info"):
         try:
+            if info_path.stat().st_size > _MAX_SIDECAR_BYTES:
+                continue
             payload = json.loads(info_path.read_text(encoding="utf-8"))
         except Exception:
             continue
@@ -1075,6 +1104,8 @@ def matching_downloaded_version_sidecar(target_dir: Path, meta: dict[str, Any]) 
         if sidecar_path.name.endswith((".failed.json", ".failed.civitai.json")):
             continue
         try:
+            if sidecar_path.stat().st_size > _MAX_SIDECAR_BYTES:
+                continue
             payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
         except Exception:
             continue
@@ -1490,12 +1521,14 @@ async def civitai_exists(request):
     }
 
     model_type = normalize_model_type(request.query.get("type"))
-    base_model = normalize_base_model(request.query.get("base_model"))
+    base_model = normalize_base_model(request.query.get("base_model"), request.query.get("air"))
     if model_type == "Workflow":
         # A wrong user id just means "not found" on a read-only check.
         search_dir = workflow_metadata_dir(request_user_id(request) or "default", base_model)
     else:
-        search_dir = choose_target_dir(model_type, base_model, "")
+        # Whole type folder, not just <type>/<base>: older downloads live in
+        # pre-slug folder names, and moved files should count regardless.
+        search_dir = choose_target_dir(model_type, base_model, "").parent
 
     existing = await asyncio.to_thread(matching_downloaded_version_sidecar, search_dir, meta)
     return web.json_response({
@@ -1773,10 +1806,19 @@ async def _run_download(job_id: int, model_id, version_id, slug, user_id: str) -
                 else None
             )
 
-            existing = matching_downloaded_version_sidecar(metadata_dir or target_dir, meta)
-            if not existing and workflow_download:
-                # Compatibility with the sibling downloader's older layout.
-                existing = matching_downloaded_version_sidecar(target_dir, meta)
+            if workflow_download:
+                existing = await asyncio.to_thread(
+                    matching_downloaded_version_sidecar, metadata_dir or target_dir, meta)
+                if not existing:
+                    # Compatibility with the sibling downloader's older layout.
+                    existing = await asyncio.to_thread(
+                        matching_downloaded_version_sidecar, target_dir, meta)
+            else:
+                # Whole type folder (loras/, checkpoints/, ...), not just the
+                # target dir: older downloads live in pre-slug folder names,
+                # and files the user reorganized should count regardless.
+                existing = await asyncio.to_thread(
+                    matching_downloaded_version_sidecar, target_dir.parent, meta)
             if existing:
                 job.update(state="already_exists", path=str(existing))
                 log.info("civitai-direct: job %s: already downloaded -> %s",
