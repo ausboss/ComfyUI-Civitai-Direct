@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct Images for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.1.0
+// @version      0.2.0
 // @description  Outlines Civitai images by available generation data (red = none, blue = prompt, green = ComfyUI nodes), adds hover buttons to copy the prompt/info/nodes, and saves image + metadata via the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -44,6 +44,21 @@
     }
 
     // Poll a queued job until it reaches a terminal state.
+    // Re-validate the cached server (or discover one), so a ComfyUI restart
+    // -- even on the other port -- heals without a second click.
+    function probeServer(callback) {
+        if (!serverBase) { discoverServer(callback); return; }
+        const rediscover = () => { serverBase = null; discoverServer(callback); };
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${serverBase}/civitai/health`,
+            timeout: 1500,
+            onload(res) { if (res.status === 200) callback(serverBase); else rediscover(); },
+            onerror: rediscover,
+            ontimeout: rediscover,
+        });
+    }
+
     function pollJob(base, jobId, onDone) {
         const startedAt = Date.now();
         const tick = () => {
@@ -489,9 +504,22 @@
             btn.style.background = 'linear-gradient(135deg,#c92a2a,#e03131)';
             return;
         }
+        if (state === 'offline') {
+            btn.textContent = '🔌';
+            btn.style.background = 'linear-gradient(135deg,#c92a2a,#e03131)';
+            btn.title = `ComfyUI is not running (checked ports ${SERVER_PORTS.join(', ')}). Start ComfyUI with the Civitai-Direct node, then retry.`;
+            return;
+        }
+        if (state === 'exists') {
+            btn.textContent = '📁';
+            btn.style.background = 'linear-gradient(135deg,#5f3dc4,#7048e8)';
+            btn.title = 'Already saved.';
+            return;
+        }
 
         btn.textContent = '⬇';
         btn.style.background = 'linear-gradient(135deg,#0b7285,#0c8599)';
+        btn.title = 'Save image and metadata via ComfyUI';
     }
 
     function makeButton(getPayload) {
@@ -543,10 +571,11 @@
             }
 
             setButtonState(btn, 'sending');
-            discoverServer(base => {
+            probeServer(base => {
                 if (!base) {
                     console.error('[civitai-direct] No ComfyUI with the Civitai-Direct node found on ports', SERVER_PORTS);
-                    fail();
+                    setButtonState(btn, 'offline');
+                    setTimeout(() => setButtonState(btn, 'idle'), 3000);
                     return;
                 }
 
@@ -572,13 +601,15 @@
 
                         pollJob(base, jobId, (ok, detail) => {
                             if (!ok) console.error('[civitai-direct] Image download failed:', detail);
-                            setButtonState(btn, ok ? 'success' : 'error');
+                            const state = !ok ? 'error' : (detail === 'already_exists' ? 'exists' : 'success');
+                            setButtonState(btn, state);
                             setTimeout(() => setButtonState(btn, 'idle'), 3000);
                         });
                     },
                     onerror() {
                         serverBase = null; // force re-discovery next click
-                        fail();
+                        setButtonState(btn, 'offline');
+                        setTimeout(() => setButtonState(btn, 'idle'), 3000);
                     },
                 });
             });
