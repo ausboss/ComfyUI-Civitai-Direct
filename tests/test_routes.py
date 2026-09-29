@@ -81,6 +81,19 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         body = await (await self.client.get("/civitai/exists?model_version_id=5&type=LORA&base_model=SDXL")).json()
         self.assertEqual(body, {"exists": False, "path": None, "model_version_id": 5})
 
+    async def test_exists_without_a_type_searches_every_folder(self):
+        # The page script no longer sends a type; a model in any folder must be found.
+        tmp = Path(self._tmp.name)
+        model = tmp / "models" / "vae" / "x.safetensors"
+        model.parent.mkdir(parents=True)
+        model.write_text("x")
+        model.with_suffix(".civitai.info").write_text(json.dumps({"id": 77, "modelId": 3}), encoding="utf-8")
+        body = await (await self.client.get("/civitai/exists?model_version_id=77&model_id=3")).json()
+        self.assertEqual(body["exists"], True)
+        self.assertEqual(body["path"], str(model))
+        body = await (await self.client.get("/civitai/exists?model_version_id=78")).json()
+        self.assertEqual(body["exists"], False)
+
     async def test_image_download_needs_an_id_or_url(self):
         self.assertEqual((await self.client.post("/civitai/download-image", json={})).status, 400)
         self.assertEqual((await self.client.post("/civitai/download-image", data="[]")).status, 400)

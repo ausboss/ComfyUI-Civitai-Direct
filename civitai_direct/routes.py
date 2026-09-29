@@ -14,10 +14,13 @@ from .images import run_image_download
 from .jobs import JOBS, create_job
 from .library import find_downloaded_version
 from .paths import (
+    all_model_roots,
     images_target_dir,
     resolve_type_dir,
     search_roots,
     workflow_metadata_dir,
+    workflow_metadata_root,
+    workflow_root,
     workflow_target_dir,
 )
 from .settings import base_folders_enabled, get_api_key_with_source, previews_mode, sidecar_mode
@@ -113,14 +116,18 @@ async def civitai_exists(request):
         return web.json_response({"error": "need a numeric model_version_id"}, status=400)
     model_id = _as_int(request.query.get("model_id"))
 
-    model_type = normalize_model_type(request.query.get("type"))
-    base_model = normalize_base_model(request.query.get("base_model"), request.query.get("air"))
-    if model_type == "Workflow":
-        # A wrong user id just means "not found" on a read-only check.
-        user_id = request_user_id(request) or "default"
-        roots = [workflow_metadata_dir(user_id, base_model), workflow_target_dir(user_id, base_model)]
+    user_id = request_user_id(request) or "default"  # a wrong user just means "not found"
+    raw_type = (request.query.get("type") or "").strip()
+    if not raw_type:
+        # The page didn't say what kind of model this is, so look everywhere.
+        roots = all_model_roots() + [workflow_metadata_root(user_id), workflow_root(user_id)]
     else:
-        roots = search_roots(model_type, base_model)
+        model_type = normalize_model_type(raw_type)
+        base_model = normalize_base_model(request.query.get("base_model"), request.query.get("air"))
+        if model_type == "Workflow":
+            roots = [workflow_metadata_dir(user_id, base_model), workflow_target_dir(user_id, base_model)]
+        else:
+            roots = search_roots(model_type, base_model)
 
     existing = await asyncio.to_thread(find_downloaded_version, roots, version_id, model_id)
     return web.json_response({

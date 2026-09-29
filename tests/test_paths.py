@@ -70,6 +70,20 @@ class TypeDirTests(unittest.TestCase):
         self.assertEqual(len(roots), len(set(roots)))
 
 
+class AllRootsTests(unittest.TestCase):
+    def test_untyped_search_covers_every_model_folder_once(self):
+        stubs.folder_paths.models_dir = str(M)
+        stubs.folder_paths.registered = {
+            "loras": ["/data/Lora", str(M / "loras")],
+            "diffusion_models": [str(M / "unet"), str(M / "diffusion_models")],
+        }
+        roots = paths.all_model_roots()
+        self.assertIn(Path("/data/Lora"), roots)
+        self.assertIn(M / "checkpoints", roots)   # unregistered names fall back to models/<name>
+        self.assertIn(M / "wildcards", roots)
+        self.assertEqual(len(roots), len(set(roots)))
+
+
 class UserDirTests(unittest.TestCase):
     def test_rejects_path_tricks_in_user_ids(self):
         for bad in ("", "..", "../x", "a/b", "a\\b", ".hidden"):

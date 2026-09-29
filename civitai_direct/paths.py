@@ -12,7 +12,7 @@ from typing import Optional
 
 import folder_paths
 
-from .classify import fallback_dirname, folder_name_for
+from .classify import TYPE_FALLBACK_DIRNAME, TYPE_TO_FOLDER_NAME, fallback_dirname, folder_name_for
 from .settings import base_folders_enabled, get_setting
 from .text import safe_folder
 
@@ -81,6 +81,18 @@ def search_roots(model_type: str, base_model: str, name_haystack: str = "") -> l
         for directory in registered_dirs(name) or [Path(folder_paths.models_dir) / name]:
             if not any(_same_path(directory, existing) for existing in roots):
                 roots.append(directory)
+    return roots
+
+
+def all_model_roots() -> list[Path]:
+    """Every model folder there is, for a check that doesn't know the type."""
+    names = sorted({*TYPE_TO_FOLDER_NAME.values(), "checkpoints", "diffusion_models"})
+    roots: list[Path] = []
+    candidates = [d for name in names for d in (registered_dirs(name) or [Path(folder_paths.models_dir) / name])]
+    candidates += [Path(folder_paths.models_dir) / dirname for dirname in TYPE_FALLBACK_DIRNAME.values()]
+    for directory in candidates:
+        if not any(_same_path(directory, existing) for existing in roots):
+            roots.append(directory)
     return roots
 
 
@@ -157,20 +169,25 @@ def images_target_dir() -> Path:
     return default_pictures_dir() / "Civitai"
 
 
-def workflow_target_dir(user_id: str, base_model: str) -> Path:
+def workflow_root(user_id: str) -> Path:
     """CIVITAI_WORKFLOW_DIR if set, else the requesting user's workflow library."""
     override = get_setting("CIVITAI_WORKFLOW_DIR")
-    base = (
-        Path(override).expanduser()
-        if override
-        else comfyui_user_dir(user_id) / "workflows" / "civitai-direct"
-    )
-    return base / safe_folder(base_model, "UnknownBaseModel")
+    if override:
+        return Path(override).expanduser()
+    return comfyui_user_dir(user_id) / "workflows" / "civitai-direct"
 
 
-def workflow_metadata_dir(user_id: str, base_model: str) -> Path:
-    """Where a workflow's sidecars go. Kept out of the workflow folder so they
+def workflow_metadata_root(user_id: str) -> Path:
+    """Where workflow sidecars go. Kept out of the workflow folder so they
     don't show up in ComfyUI's workflow picker."""
     override = get_setting("CIVITAI_WORKFLOW_DIR")
     base = Path(override).expanduser() if override else comfyui_user_dir(user_id)
-    return base / ".civitai-direct" / "workflow-metadata" / safe_folder(base_model, "UnknownBaseModel")
+    return base / ".civitai-direct" / "workflow-metadata"
+
+
+def workflow_target_dir(user_id: str, base_model: str) -> Path:
+    return workflow_root(user_id) / safe_folder(base_model, "UnknownBaseModel")
+
+
+def workflow_metadata_dir(user_id: str, base_model: str) -> Path:
+    return workflow_metadata_root(user_id) / safe_folder(base_model, "UnknownBaseModel")
