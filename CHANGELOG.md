@@ -1,34 +1,56 @@
 # Changelog
 
-All notable changes to ComfyUI-Civitai-Direct are documented here.
-
 ## Unreleased
 
-- **Switched the default model sidecar to the ecosystem's `<stem>.civitai.info`** — the verbatim Civitai model-version record that SD-WebUI Civitai Helper, LoRA-loader Civitai panels, and ComfyUI-Image-Saver already read for trigger words and offline model info. The previous `<file>.json` + `<file>.md` pair remains available via `CIVITAI_SIDECARS=full` (workflows keep it always). Duplicate detection reads both dialects — including `.civitai.info` files written by *other* tools — and backfills the new sidecar when an old download is re-requested, so existing libraries converge without re-downloading.
-- **Added preview images**: `<stem>.preview.<ext>` next to every model (the convention A1111/Forge, Civitai Helper, and Lora Manager display), named by the file's actual bytes since Civitai's CDN serves PNGs from `.jpeg` URLs. Default mode `sfw` picks the version's tamest image and skips models with nothing at PG/PG13; `CIVITAI_PREVIEWS=any` uses Civitai's cover choice, `off` disables.
-- **Renamed base-model folders to lowercase AIR-style slugs** (`sd15`, `sdxl`, `pony`, `flux1`, `krea2`, `wan-video-22-t2v-a14b`, ...): no more spaces or dots in folder names. Unknown families take the ecosystem token from the version's AIR urn, so brand-new base models sort correctly with no code change. Old folder names keep working — the dedupe scan now covers the whole type folder, so nothing is downloaded twice after the rename.
-- **The buttons now know things before you click**: the model-page button checks the new `GET /civitai/exists` route on load and renders violet "📁 In Your Library" (tooltip shows the file's path) when you already have the version, and red "🔌 ComfyUI Offline" when no server answers (re-probed every ~45 s and on click). `already_exists` results show as "already in your library" instead of masquerading as a fresh download, across all three userscripts. Clicks re-validate a cached server, so a ComfyUI restart — even on the other probe port — heals without a second click.
-- **Downloads are SHA256-verified** against Civitai's published hash; a mismatched transfer is quarantined as `.corrupt` and reported as a readable job error instead of posing as a model.
-- **Added folder routing for newer Civitai types**: CLIP → `text_encoders/`, CLIPVision → `clip_vision/`, UNet → `diffusion_models/`, MotionModule → `animatediff_models/`, Detection → `ultralytics/` (the latter two resolve through the registering node pack's folder when installed).
-- `/civitai/health` reports the active `sidecars` and `previews` modes; userscripts gained `@connect localhost` for setups that address the server by hostname.
+### Added
+
+- One userscript now covers everything: the model-page button, the model-card button and the gallery tools. Install `civitai-direct.user.js` and remove the two older scripts, which update to empty ones.
+- "Set ComfyUI address" in the Tampermonkey menu, for a ComfyUI on another port, another computer or a remote machine. The address survives script updates.
+- The userscript finds ComfyUI on ports 8188, 8000 (the desktop app) and 8189, and only counts a server that answers as this node.
+- A failed download says why when you hover the button, and a missing API key shows as "API Key Needed".
+- `CIVITAI_BASE_FOLDERS=off` saves models straight into `loras/`, `checkpoints/` and the like, without a base-model subfolder.
+- Preview images: `<stem>.preview.<ext>` beside every model. The file type comes from the image's bytes, since Civitai serves PNGs from `.jpeg` addresses. The default picks the tamest image and skips a model that has nothing rated PG or PG13. `CIVITAI_PREVIEWS=any` uses Civitai's cover image, and `off` saves none.
+- The buttons check before you click. The model-page button asks the new `GET /civitai/exists` route whether you already have the version and shows "In Your Library", or shows "ComfyUI Offline" when nothing answers. Results that were already in your library are labelled as such on all buttons.
+- Folder routing for CLIP (`text_encoders/`), CLIPVision, UNet, MotionModule and Detection models.
+- A unit test suite: `python -m unittest discover -s tests -t .`.
+- `/civitai/health` reports the active `sidecars`, `previews` and `base_folders` settings.
+
+### Changed
+
+- The code moved from one 2,000-line `__init__.py` into the `civitai_direct/` package. `__init__.py` only registers the routes. Behaviour is the same except for the fixes below.
+- Models now get the `<stem>.civitai.info` file that SD-WebUI Civitai Helper, Lora Manager and ComfyUI-Image-Saver read, in place of the `.json` and `.md` pair. `CIVITAI_SIDECARS=full` writes the pair as well, and workflows always keep it. Duplicate detection reads both kinds, including `.civitai.info` files written by other tools, and adds the new file when you ask for a model you downloaded earlier.
+- Base-model folders are lowercase names without spaces or dots (`sd15`, `sdxl`, `pony`, `flux1`, `krea2`, `wan-video-22-t2v-a14b`). A base model the node has not seen takes its name from the version's AIR identifier. Folders from earlier releases are still searched, so nothing downloads twice.
+- The model-page button no longer reads type, base model, trigger words or hashes from Civitai's page markup, which the server never used. It sends the model and version ids, and takes the type and base model for its label from Civitai's API.
+- Requests identify as `ComfyUI-Civitai-Direct` instead of a Windows browser.
+- The undocumented `/civitai/download-by-id` alias is gone. Use `/civitai/download`, which takes the same payloads.
+- The contributor guide, `AGENTS.md`, no longer contains machine-specific paths.
+
+### Fixed
+
+- An image address sent by the browser to `/civitai/download-image` was fetched with your API key attached. Only `civitai.com` addresses are fetched now.
+- A folder from `extra_model_paths.yaml` marked `is_default: true` was ignored unless it was named exactly like ComfyUI's own (`models/Lora` lost to `models/loras`).
+- Duplicate checks only looked in the folder new files go to. They now cover every folder ComfyUI has registered for the type, including checkpoints kept in `diffusion_models/`.
+- File names containing `[` and `]` were never recognized as already downloaded.
+- SD 1.4, SD 2.1 and SD 3.x checkpoints were saved to `diffusion_models/`, where Load Checkpoint cannot see them.
+- Every `GET /civitai/exists` call read every sidecar in the library again. Parsed sidecars are cached until the file changes, folder listings are reused for a few seconds, and unrelated `.json` files are no longer opened.
+- A JSON body that was not an object returned a 500 error.
+- Finished jobs were kept in memory forever. The most recent 200 are kept.
+- Workflow ZIPs are limited in size and entry count.
+- Windows device names such as `CON` are no longer used as file names.
+- Downloads are checked against Civitai's SHA256. A file that does not match is kept as `.corrupt` and reported as an error.
+- Errors for models that need a login now say so and say how to add an API key. Early Access errors name the date the version opens.
 
 ## 0.1.0
 
-- Added the `/civitai/*` routes on ComfyUI's own server: `health`, `download`, `download-image`, `status`, `jobs`.
-- Added gallery-image downloads (`/civitai/download-image` + the images userscript, ported from easy-civitai-downloader): fetches the original upload (PNG originals keep embedded generation/ComfyUI metadata), writes a `.json` sidecar (schema `ausboss-civitai-image-sidecar-v1`), the prompt as `.txt`, and the ComfyUI graph as `.workflow.json` when one exists; already-downloaded image ids are skipped as `already_exists`.
-- Added `CIVITAI_IMAGE_DIR` and `CIVITAI_WORKFLOW_DIR` settings (environment or `.env`, re-read per download). Defaults: the OS Pictures folder (`Civitai/` subfolder; Windows known-folder and Linux XDG aware) for images, ComfyUI's user workflow library for workflows. `/civitai/health` reports the resolved `images_dir` and `workflows_dir`.
-- Added type routing via `folder_paths` — SD-family checkpoints to `checkpoints/`, Flux/Wan/LTX to `diffusion_models/`, LyCORIS/DoRA to `loras/`, embeddings, VAE, ControlNet, upscalers, text encoders — each under a normalized `<base model>/` subfolder.
-- Added `.json` + `.md` metadata sidecars (schema `ausboss-civitai-model-sidecar-v1`, shared with easy-civitai-downloader) with SHA256, trigger words, and token redaction.
-- Added classification metadata to both sidecars so other tools can sort, filter, and identify files without re-querying Civitai: decoded NSFW browsing levels (per-version and per-model), the `poi` / `minor` / `sfwOnly` flags, availability and usage control, file format / precision / pruned-or-full, pickle and virus scan results, licensing permissions, per-version stats, and Civitai's full hash set (AutoV1/V2/V3, CRC32, BLAKE3). The `.md` note gained a matching `## Classification` section.
-- Fixed the AIR identifier always being empty: the model endpoint's embedded version objects omit it (along with `usageControl`, `uploadType` and `updatedAt`), so the version endpoint is now merged in as well.
-- Added two-layer duplicate detection: an already-downloaded version is recognized by its sidecar, and a same-named file from any other source is SHA256-verified against Civitai's hash and adopted (sidecars backfilled) instead of re-downloaded — a ` (1)` suffix is used only for true name collisions with different content.
-- Added Wan-family slug-aware filenames.
-- Added user-aware Civitai workflow downloads under `user/<user>/workflows/civitai-direct/<base model>/`, including safe ZIP extraction, nested ZIP handling, picker-safe metadata sidecars, and duplicate detection.
-- Added the model-page and grid userscripts with ComfyUI port discovery (8188/8189) and live job polling — download progress and failures now show on the button.
-- Added API key support via `CIVITAI_API_KEY`, a `.env` file, or `civitai_api_key.txt` — file keys are re-read per download (no restart), `/civitai/health` reports whether and where a key loaded, and downloads send the key both as `Authorization: Bearer` and `?token=`.
-- Added distinct error messages for login-required vs Early Access versions (an API key does not unlock Early Access), with token redaction on every stored or logged error.
-- Added Early Access warnings to the userscripts: grid cards and model pages show a yellow ⚡ Early Access button (detected from Civitai's own card badge / version notice), and the grid button requires a deliberate double click so EA models aren't queued by accident.
-- Fixed Early Access detection server-side: the models API misreports EA versions as `Public` and the download endpoint answers browser-like requests with an HTML redirect, so refusals are now re-probed as JSON — errors name Early Access explicitly and include the date the version unlocks for everyone.
-- Duplicate detection now follows files you reorganize: a model moved into a subfolder (or another base-model folder of the same type) is recognized via its moved sidecar or by name + SHA256, instead of being downloaded again.
-- Reworked console output into a readable per-job flow — resolved name/version/type/base, size and destination, then the result — with all names and paths escaped to ASCII so a cp1252 Windows console can never crash on them.
-- Added the "Is this safe?" / "Does this send my data anywhere?" README sections.
+First release.
+
+- Adds the `/civitai/*` routes to ComfyUI's own server: `health`, `download`, `download-image`, `status` and `jobs`.
+- Sorts models by type and base model into the folders ComfyUI reads, taken from `folder_paths` so `extra_model_paths.yaml` is honored.
+- Downloads Civitai workflows into ComfyUI's workflow library, with safe ZIP extraction, nested ZIP handling and duplicate detection.
+- Downloads gallery images (`/civitai/download-image`) as the original upload with a `.json` record, the prompt as `.txt` and the ComfyUI graph as `.workflow.json`. The image location is `CIVITAI_IMAGE_DIR`, and the default is the Pictures folder on Windows and Linux, including moved and OneDrive folders.
+- Writes `.json` and `.md` records for each model (schema `ausboss-civitai-model-sidecar-v1`, shared with easy-civitai-downloader) with SHA256, trigger words, ratings, license, file details and Civitai's hashes.
+- Skips files you already have. A version is recognized by its record, and a same-named file is compared by SHA256 and adopted when it matches. A different file with the same name is saved as `name (1)`.
+- Reads the API key from `CIVITAI_API_KEY`, a `.env` file or `civitai_api_key.txt`. File keys are read on every download.
+- Explains Login and Early Access refusals separately. The models API reports Early Access versions as public, so the node asks the download endpoint and reports the date the version opens.
+- Adds the model-page and model-card userscripts, and the gallery-image userscript, with live progress on the buttons and a yellow Early Access state.
+- Keeps console output readable for every model name by escaping non-ASCII text, so a Windows console cannot crash on it.
