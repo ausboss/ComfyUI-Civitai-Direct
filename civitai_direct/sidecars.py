@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from . import LOGGER_NAME
-from .civitai_api import is_civitai_url
+from .civitai_api import CHUNK, get, is_civitai_url
 from .jobs import discard
 from .settings import previews_mode
 from .text import format_size, log_safe, now_iso, redact_civitai_token
@@ -18,7 +18,6 @@ from .text import format_size, log_safe, now_iso, redact_civitai_token
 log = logging.getLogger(LOGGER_NAME)
 
 SIDECAR_SCHEMA = "ausboss-civitai-model-sidecar-v1"  # shared with easy-civitai-downloader
-CHUNK = 1 << 20  # 1 MiB per event-loop turn keeps the server responsive
 _PREVIEW_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
@@ -113,7 +112,7 @@ async def save_preview_image(
     dest = preview_path_for(model_path, entry["url"])
     part = dest.parent / (dest.name + ".part")
     try:
-        async with session.get(entry["url"]) as resp:
+        async with get(session, entry["url"]) as resp:
             resp.raise_for_status()
             with part.open("wb") as fh:
                 async for chunk in resp.content.iter_chunked(CHUNK):

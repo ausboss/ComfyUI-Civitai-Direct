@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import re
 import struct
 import zlib
 from pathlib import Path
@@ -13,10 +12,10 @@ from urllib.parse import urlparse
 import aiohttp
 
 from . import LOGGER_NAME
-from .civitai_api import CIVITAI_IMAGE_API, is_civitai_url, open_session
+from .civitai_api import CHUNK, CIVITAI_IMAGE_API, get, is_civitai_url, open_session
 from .jobs import JOBS, claim_destination, discard, job_error_message, release_destination
 from .paths import images_target_dir
-from .sidecars import CHUNK, write_json
+from .sidecars import write_json
 from .text import console_safe, format_size, log_safe, now_iso, safe_filename
 
 log = logging.getLogger(LOGGER_NAME)
@@ -242,7 +241,7 @@ def existing_image_for_id(images_dir: Path, image_id: Optional[int]) -> Optional
 
 async def fetch_civitai_image(session: aiohttp.ClientSession, image_id: int) -> Optional[dict[str, Any]]:
     try:
-        async with session.get(CIVITAI_IMAGE_API, params={"imageId": str(image_id)}) as resp:
+        async with get(session, CIVITAI_IMAGE_API, params={"imageId": str(image_id)}) as resp:
             resp.raise_for_status()
             data = await resp.json()
     except Exception as exc:  # noqa: BLE001 -- enrichment only, never a blocker
@@ -302,7 +301,7 @@ async def run_image_download(job_id: int, data: dict[str, Any], image_id: Option
             )
 
             job["state"] = "downloading"
-            async with session.get(image_url) as resp:
+            async with get(session, image_url) as resp:
                 if resp.status in (401, 403):
                     raise RuntimeError(
                         f"Civitai returned {resp.status} for the image. It may require a "

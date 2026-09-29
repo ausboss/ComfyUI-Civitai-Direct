@@ -170,10 +170,6 @@ const Core = (function () {
     const OBSERVER_DEBOUNCE_MS = 150;
 
 
-    function cleanText(value) {
-        return (value || '').replace(/\s+/g, ' ').trim();
-    }
-
     function parseIntSafe(value) {
         const n = Number.parseInt(value, 10);
         return Number.isFinite(n) ? n : null;
@@ -211,9 +207,11 @@ const Core = (function () {
         return `https://civitai.com/api/download/models/${modelVersionId}?type=Model&format=SafeTensor`;
     }
 
+    // The readable part of /models/<id>/<slug>, if the address has one.
     function getModelSlug() {
         const parts = window.location.pathname.split('/').filter(Boolean);
-        return parts[parts.length - 1] || 'model';
+        if (parts[0] !== 'models' || !parts[2]) return null;
+        try { return decodeURIComponent(parts[2]); } catch (_) { return parts[2]; }
     }
 
     // Civitai's version-specific early-access notice ("The creator ... has
@@ -882,7 +880,7 @@ const Core = (function () {
     function modelInfoFromHref(href) {
         const m = href.match(/\/models\/(\d+)(?:\/([^/?#]+))?/);
         if (!m) return null;
-        let slug = m[2] || 'model';
+        let slug = m[2] || null;
         try {
             slug = decodeURIComponent(slug);
         } catch (_) {

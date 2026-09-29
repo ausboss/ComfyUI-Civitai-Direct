@@ -21,6 +21,7 @@ class LibraryTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         library._cache.clear()
+        library.invalidate_listings()
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -81,6 +82,21 @@ class LibraryTests(unittest.TestCase):
         for i in range(8):
             write(self.root / f"d{i}" / "Model.safetensors")
         self.assertEqual(len(library.find_same_named_files([self.root], "model.SAFETENSORS", limit=5)), 5)
+
+    def test_v1_records_for_any_model_extension_are_read(self):
+        # Regression: only a fixed list of model extensions was accepted.
+        model = write(self.root / "style.pkl")
+        write(self.root / "style.pkl.json", {"status": "downloaded", "model": {"id": 5, "version_id": 6},
+                                              "local": {"model_file_name": "style.pkl"}})
+        self.assertEqual(library.find_downloaded_version([self.root], 6, 5), model)
+
+    def test_folder_listings_are_reused_until_invalidated(self):
+        write(self.root / "a.safetensors")
+        self.assertEqual(len(library.find_same_named_files([self.root], "b.safetensors")), 0)
+        write(self.root / "b.safetensors")
+        self.assertEqual(len(library.find_same_named_files([self.root], "b.safetensors")), 0)  # cached listing
+        library.invalidate_listings()
+        self.assertEqual(len(library.find_same_named_files([self.root], "b.safetensors")), 1)
 
     def test_symlinked_folders_are_followed_and_loops_end(self):
         real = self.root / "real"

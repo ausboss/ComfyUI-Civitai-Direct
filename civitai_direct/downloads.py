@@ -12,8 +12,10 @@ from typing import Any, Optional
 
 from . import LOGGER_NAME
 from .civitai_api import (
+    CHUNK,
     add_token_to_url,
     gated_error,
+    get,
     open_session,
     probe_gate_reason,
     resolve_model,
@@ -25,11 +27,10 @@ from .classify import (
     slug_aware_filename,
 )
 from .jobs import JOBS, claim_destination, discard, job_error_message, release_destination
-from .library import calculate_sha256, find_downloaded_version, find_same_named_files
+from .library import calculate_sha256, find_downloaded_version, find_same_named_files, invalidate_listings
 from .paths import choose_target_dir, search_roots, workflow_metadata_dir, workflow_target_dir
-from .settings import get_api_key_with_source, sidecar_mode
+from .settings import sidecar_mode
 from .sidecars import (
-    CHUNK,
     build_civitai_info,
     build_sidecar_json,
     civitai_info_path,
@@ -68,11 +69,30 @@ class ModelDownload:
         self.slug = slug
         self.user_id = user_id
 
+        # Set by run() and _resolve(), listed here so the whole state is visible.
         self.session: Any = None
+        self.model_json: dict[str, Any] = {}
+        self.version_json: dict[str, Any] = {}
+        self.meta: dict[str, Any] = {}
+        self.model_type = ""
+        self.is_workflow = False
+        self.file: dict[str, Any] = {}
+        self.download_url = ""
+        self.api_sha256 = ""
+        self.target_dir = Path()
+        self.metadata_dir: Optional[Path] = None
+        self.roots: list[Path] = []
+
+        self.dest = Path()                      # where the download is written
+        self.workflow_folder: Optional[Path] = None  # where a workflow ZIP extracts to
+        self.artifact = Path()                  # the finished file or folder
+        self.file_sha256 = ""
+        self.file_size = 0
+        self.sidecar_names: list[str] = []
+
         self.part: Optional[Path] = None
         self.extraction_part: Optional[Path] = None
         self.claim: Optional[str] = None
-        self.workflow_folder: Optional[Path] = None
         self._hashes: dict[str, str] = {}
 
     # ---- the pipeline ----------------------------------------------------
@@ -91,6 +111,7 @@ class ModelDownload:
                 await self._verify()
                 await self._extract_workflow()
                 await self._write_sidecars()
+                invalidate_listings()
                 self.job["state"] = "done"
                 log.info("civitai-direct: job %s: done -> %s (+ %s)", self.job_id,
                          console_safe(self.artifact), "/".join(self.sidecar_names) or "no sidecars")
@@ -140,7 +161,7 @@ class ModelDownload:
         haystack = " ".join(filter(None, [meta.get("model_name"), meta.get("version_name"), self.file.get("name")]))
         if self.is_workflow:
             self.target_dir = workflow_target_dir(self.user_id, meta["base_model"])
-            self.metadata_dir: Optional[Path] = workflow_metadata_dir(self.user_id, meta["base_model"])
+            self.metadata_dir = workflow_metadata_dir(self.user_id, meta["base_model"])
             self.roots = [self.metadata_dir, self.target_dir]
         else:
             self.target_dir = choose_target_dir(self.model_type, meta["base_model"], haystack)
@@ -149,8 +170,7 @@ class ModelDownload:
             # go to: files the user keeps elsewhere or reorganized still count.
             self.roots = search_roots(self.model_type, meta["base_model"], haystack)
 
-        self.artifact: Path = self.target_dir
-        self.sidecar_names: list[str] = []
+        self.artifact = self.target_dir
 
     # ---- what is already here --------------------------------------------
 
@@ -168,6 +188,7 @@ class ModelDownload:
         if not self.is_workflow and existing.is_file():
             self._write_info_if_missing(existing)
             await save_preview_image(self.session, self.version_json, existing, self.job_id)
+            invalidate_listings()
         log.info("civitai-direct: job %s: already downloaded -> %s", self.job_id, console_safe(existing))
         return True
 
@@ -220,6 +241,7 @@ class ModelDownload:
                 )
                 write_json(json_path, sidecar)
                 write_markdown(path.with_suffix(path.suffix + ".md"), sidecar)
+        invalidate_listings()
         log.info("civitai-direct: job %s: identical file already on disk, adopted -> %s",
                  self.job_id, console_safe(path))
 
@@ -231,7 +253,7 @@ class ModelDownload:
         self.job["state"] = "downloading"
         availability = self.version_json.get("availability")
 
-        async with self.session.get(add_token_to_url(self.download_url)) as resp:
+        async with get(self.session, add_token_to_url(self.download_url)) as resp:
             if resp.status in (401, 403):
                 try:
                     body_text = (await resp.text())[:2000]

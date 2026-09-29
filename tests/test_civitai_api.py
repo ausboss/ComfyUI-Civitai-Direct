@@ -38,6 +38,36 @@ class HostTests(unittest.TestCase):
         self.assertTrue(civitai_api.user_agent().startswith("ComfyUI-Civitai-Direct/"))
 
 
+class RequestAuthTests(unittest.TestCase):
+    def sent_headers(self, url, key="k3y"):
+        session = mock.Mock()
+        with mock.patch.object(civitai_api, "get_api_key", return_value=key):
+            civitai_api.get(session, url, headers={"Accept": "application/json"})
+        return session.get.call_args.kwargs["headers"]
+
+    def test_the_key_goes_to_civitai_only(self):
+        self.assertEqual(self.sent_headers("https://civitai.com/api/v1/models/1")["Authorization"], "Bearer k3y")
+        self.assertEqual(self.sent_headers("https://image.civitai.com/x.png")["Accept"], "application/json")
+        for url in ("http://127.0.0.1:8188/x", "https://evil.example/x", "https://civitai.com.evil.io/x"):
+            with self.subTest(url):
+                self.assertNotIn("Authorization", self.sent_headers(url))
+
+    def test_no_key_no_header(self):
+        self.assertNotIn("Authorization", self.sent_headers("https://civitai.com/x", key=""))
+
+    def test_the_session_itself_carries_no_credentials(self):
+        import asyncio
+
+        async def check():
+            with mock.patch.object(civitai_api, "get_api_key", return_value="k3y"):
+                async with civitai_api.open_session() as session:
+                    return dict(session.headers)
+
+        headers = asyncio.run(check())
+        self.assertNotIn("Authorization", headers)
+        self.assertTrue(headers["User-Agent"].startswith("ComfyUI-Civitai-Direct/"))
+
+
 class UrlParsingTests(unittest.TestCase):
     def test_page_url_with_version(self):
         self.assertEqual(civitai_api.parse_ids_from_url("https://civitai.com/models/16014/slug?modelVersionId=19075"),

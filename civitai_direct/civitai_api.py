@@ -24,6 +24,7 @@ CIVITAI_MODEL_API = "https://civitai.com/api/v1/models/{model_id}"
 CIVITAI_VERSION_API = "https://civitai.com/api/v1/model-versions/{version_id}"
 CIVITAI_IMAGE_API = "https://civitai.com/api/v1/images"
 CIVITAI_HOSTS = ("civitai.com", "civitai.red")
+CHUNK = 1 << 20  # 1 MiB per event-loop turn keeps the server responsive
 
 
 def is_civitai_url(url: Any) -> bool:
@@ -44,17 +45,22 @@ def user_agent() -> str:
     return f"ComfyUI-Civitai-Direct/{NODE_VERSION} (+{REPO_URL})"
 
 
-def auth_headers() -> dict[str, str]:
-    headers = {"User-Agent": user_agent()}
-    key = get_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    return headers
-
-
 def open_session() -> aiohttp.ClientSession:
+    """A session with no credentials of its own. Use `get()` for requests, so
+    the API key is attached only to Civitai addresses."""
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
-    return aiohttp.ClientSession(headers=auth_headers(), timeout=timeout)
+    return aiohttp.ClientSession(headers={"User-Agent": user_agent()}, timeout=timeout)
+
+
+def get(session: aiohttp.ClientSession, url: str, **kwargs: Any):
+    """session.get that sends the API key as a Bearer header when, and only
+    when, the URL is on Civitai. aiohttp also drops that header if a redirect
+    leaves the origin."""
+    headers = dict(kwargs.pop("headers", None) or {})
+    key = get_api_key()
+    if key and is_civitai_url(url):
+        headers["Authorization"] = f"Bearer {key}"
+    return session.get(url, headers=headers, **kwargs)
 
 
 def add_token_to_url(url: str) -> str:
@@ -102,7 +108,7 @@ def parse_image_id_from_url(url: Optional[str]) -> Optional[int]:
 
 
 async def fetch_json(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
-    async with session.get(url) as resp:
+    async with get(session, url) as resp:
         if resp.status in (401, 403):
             raise RuntimeError(
                 f"Civitai returned {resp.status} for {url}. The model may need a login: "
@@ -204,8 +210,8 @@ async def probe_gate_reason(session: aiohttp.ClientSession, url: str) -> str:
     redirect to a login page when asked like a browser. Returns '' on anything
     unexpected: this only decorates an error we already have."""
     try:
-        async with session.get(
-            url, headers={"Accept": "application/json"}, allow_redirects=False,
+        async with get(
+            session, url, headers={"Accept": "application/json"}, allow_redirects=False,
         ) as resp:
             if resp.status in (401, 403):
                 return (await resp.text())[:2000]

@@ -2,7 +2,11 @@
 place every background failure is reported."""
 
 import itertools
+import shutil
+from pathlib import Path
 from typing import Any, Optional
+
+from .text import redact_civitai_token
 
 # States a job can end in. Anything else is still in progress: resolving,
 # hashing_existing, downloading, hashing, extracting, writing_metadata.
@@ -45,9 +49,6 @@ def release_destination(key: Optional[str]) -> None:
 
 def discard(path: Any) -> None:
     """Remove a leftover partial file or folder, ignoring any failure."""
-    import shutil
-    from pathlib import Path
-
     try:
         target = Path(path)
         if target.is_dir():
@@ -61,7 +62,5 @@ def discard(path: Any) -> None:
 def job_error_message(exc: BaseException) -> str:
     """Our own RuntimeErrors are written to be read as they are; anything else
     keeps its type name, which is what helps someone report it."""
-    from .text import redact_civitai_token
-
     text = str(exc) if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: {exc}"
     return redact_civitai_token(text)

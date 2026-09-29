@@ -45,8 +45,10 @@ userscripts/
 tests/                      Standard-library unittest suite.
 ```
 
-Only `paths.py` and `routes.py` import ComfyUI. Everything else can be
-imported and tested without it.
+Only `paths.py` and `routes.py` import ComfyUI directly. `images.py` and
+`downloads.py` import `paths`, so their tests install stand-ins for
+`folder_paths` and `server` (see `tests/stubs.py`). The other modules need
+nothing from ComfyUI.
 
 Model destination folders always come from ComfyUI's `folder_paths`, which
 already honors `extra_model_paths.yaml`. Do not add a separate path

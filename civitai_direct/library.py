@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
@@ -28,7 +29,7 @@ _cache: dict[str, tuple[int, int, Optional[dict[str, Any]]]] = {}
 _cache_lock = threading.Lock()
 
 
-def iter_files(root: Path) -> Iterator[Path]:
+def _walk(root: Path) -> Iterator[Path]:
     """Every file under root. Symlinked folders are followed, and a folder is
     visited once even when links loop back."""
     seen: set[str] = set()
@@ -54,13 +55,46 @@ def iter_files(root: Path) -> Iterator[Path]:
                 continue
 
 
+# Walking a big library costs real time, and one page view or download asks
+# several questions in a row. Listings are reused for a few seconds, and
+# dropped as soon as this node saves something.
+LISTING_TTL_SECONDS = 15.0
+_MAX_CACHED_LISTINGS = 32
+_listings: dict[str, tuple[float, list[Path]]] = {}
+
+
+def iter_files(root: Path) -> Iterator[Path]:
+    key = str(root)
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _listings.get(key)
+    if hit and now - hit[0] < LISTING_TTL_SECONDS:
+        yield from hit[1]
+        return
+    files = list(_walk(root))
+    with _cache_lock:
+        if len(_listings) >= _MAX_CACHED_LISTINGS:
+            _listings.clear()
+        _listings[key] = (now, files)
+    yield from files
+
+
+def invalidate_listings() -> None:
+    """Forget cached folder listings, after a file was added."""
+    with _cache_lock:
+        _listings.clear()
+
+
+_NOT_SIDECARS = (".failed.json", ".failed.civitai.json", ".workflow.json", ".preview.json")
+
+
 def _is_v1_sidecar_name(name: str) -> bool:
-    """`<model file>.json` or `<workflow>.civitai.json`, never a `.failed` record."""
-    if not name.endswith(".json") or name.endswith((".failed.json", ".failed.civitai.json")):
+    """`<file>.<ext>.json` or `<workflow>.civitai.json`: a JSON file whose name
+    has another extension inside it. That keeps a folder's config.json and
+    similar files from being opened, without listing every model extension."""
+    if not name.endswith(".json") or name.endswith(_NOT_SIDECARS):
         return False
-    if name.endswith(".civitai.json"):
-        return True
-    return Path(name[: -len(".json")]).suffix.lower() in MODEL_FILE_SUFFIXES
+    return bool(Path(name[: -len(".json")]).suffix)
 
 
 def _summarize(payload: Any, kind: str) -> Optional[dict[str, Any]]:
