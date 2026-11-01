@@ -17,7 +17,10 @@ keep working, and how to check a change.
 - Code, images and text must be your own or under a license that allows MIT
   redistribution, with the source credited.
 - No dependencies beyond what ComfyUI already ships (aiohttp). No pip installs,
-  no compiled files, no install scripts.
+  no compiled files, and nothing that runs at install time. Never add an
+  `install.py`: ComfyUI Manager runs that file automatically. `quickstart.py`
+  is the one setup helper. It uses only the standard library and runs only
+  when a person starts it.
 
 ## Layout
 
@@ -42,6 +45,9 @@ userscripts/
   civitai-direct-grid.user.js, civitai-direct-images.user.js
                             Empty stubs. Their features moved into civitai-direct.user.js, and
                             the stubs exist so installed copies update instead of duplicating buttons.
+quickstart.py, quickstart.bat
+                            Optional setup helper: finds ComfyUI, installs the node, saves the
+                            API key to .env, checks /civitai/health. Not imported by the node.
 tests/                      Standard-library unittest suite.
 ```
 
@@ -97,6 +103,12 @@ Other tools and installed userscripts depend on these. Do not break them.
 - Bump `@version` in `civitai-direct.user.js` on every change to it, or Tampermonkey will not offer
   the update.
 
+## Setting it up for a user
+
+The README's "Setting this up for someone (for AI agents)" section is the
+step-by-step for installing this on someone's machine. Keep it in step with
+`quickstart.py` when either changes.
+
 ## Checking a change
 
 Run the unit tests with ComfyUI's Python, since they need aiohttp:
@@ -104,6 +116,7 @@ Run the unit tests with ComfyUI's Python, since they need aiohttp:
 ```bash
 python -m unittest discover -s tests -t .
 node --check userscripts/civitai-direct.user.js
+python quickstart.py --help
 ```
 
 A change to downloading or folder routing also needs a real run on a scratch ComfyUI, so that
