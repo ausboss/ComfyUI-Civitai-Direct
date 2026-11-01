@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Direct for ComfyUI
 // @namespace    https://github.com/ausboss/ComfyUI-Civitai-Direct
-// @version      0.3.0
+// @version      0.3.1
 // @description  One-click Civitai downloads into your ComfyUI model folders: a button on model pages and model cards, and a saver for gallery images. Needs the ComfyUI-Civitai-Direct custom node.
 // @match        *://civitai.com/*
 // @match        *://www.civitai.com/*
@@ -359,7 +359,7 @@ const Core = (function () {
         button.style.margin = '0 0 8px 0';
         button.style.border = '1px solid transparent';
         button.style.borderRadius = '8px';
-        button.style.background = 'linear-gradient(135deg, #0b7285, #0c8599)';
+        button.style.background = 'linear-gradient(135deg, #14424D, #0E6F6A)';
         button.style.color = '#ffffff';
         button.style.fontSize = '14px';
         button.style.fontWeight = '700';
@@ -368,7 +368,7 @@ const Core = (function () {
         button.style.cursor = 'pointer';
         button.style.flex = 'none';
         button.style.boxSizing = 'border-box';
-        button.style.boxShadow = '0 1px 3px rgba(0,0,0,0.25)';
+        button.style.boxShadow = '0 1px 3px rgba(0,0,0,0.25), inset 0 0 0 1px rgba(0,180,170,0.6)';
         button.style.transition = 'background-color 0.15s ease, opacity 0.15s ease, transform 0.08s ease';
     }
 
@@ -418,7 +418,7 @@ const Core = (function () {
 
         if (state === 'idle') {
             button.textContent = `⚡ ${labelBase}`;
-            button.style.background = 'linear-gradient(135deg, #0b7285, #0c8599)';
+            button.style.background = 'linear-gradient(135deg, #14424D, #0E6F6A)';
             button.disabled = false;
             button.style.opacity = '1';
             return;
@@ -842,7 +842,7 @@ const Core = (function () {
     const MARK = 'data-tm-grid-btn';
     const BUTTON_MARK = 'data-tm-grid-server-btn';
 
-    const IDLE_BG = 'linear-gradient(135deg,#0b7285,#0c8599)';
+    const IDLE_BG = 'linear-gradient(135deg,#14424D,#0E6F6A)';
     const EA_BG = 'linear-gradient(135deg,#f59f00,#fab005)';
 
     // Civitai renders a literal "Early Access" status badge on cards whose
@@ -901,8 +901,8 @@ const Core = (function () {
             width: '26px', height: '24px', padding: '0',
             fontSize: '13px', lineHeight: '24px', fontWeight: '700',
             color: '#fff', border: 'none', borderRadius: '6px',
-            background: 'linear-gradient(135deg,#0b7285,#0c8599)',
-            cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,.35)'
+            background: 'linear-gradient(135deg,#14424D,#0E6F6A)',
+            cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,.35), inset 0 0 0 1px rgba(0,180,170,.6)'
         });
 
         btn.addEventListener('click', (e) => {
@@ -1474,7 +1474,7 @@ const Core = (function () {
         }
 
         btn.textContent = '⬇';
-        btn.style.background = 'linear-gradient(135deg,#0b7285,#0c8599)';
+        btn.style.background = 'linear-gradient(135deg,#14424D,#0E6F6A)';
         btn.title = 'Save image and metadata via ComfyUI';
     }
 
