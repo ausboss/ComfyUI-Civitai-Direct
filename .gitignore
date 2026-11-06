@@ -1,5 +1,6 @@
-# Your real API key, if you use the key-file option — never commit it
+# Your Civitai API key, if you use the key-file option. Never commit it.
 civitai_api_key.txt
+.env
 
 # Python
 __pycache__/
@@ -8,7 +9,11 @@ __pycache__/
 # Partial downloads
 *.part
 
+# Local working files
+.claude/
+_scratch/
+ausboss_*.md
+
 # OS
 .DS_Store
 Thumbs.db
-.env
