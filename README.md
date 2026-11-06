@@ -2,6 +2,12 @@
 
 Click a button on Civitai and the model is saved into the right ComfyUI folder.
 
+<p>
+  <img src="https://img.shields.io/badge/ComfyUI-custom%20node-14424D?style=flat-square&labelColor=161F21" alt="ComfyUI custom node">
+  <img src="https://img.shields.io/badge/license-MIT-00B4AA?style=flat-square&labelColor=161F21" alt="MIT License">
+  <img src="https://img.shields.io/badge/%F0%9F%86%8E-AusBoss-00B4AA?style=flat-square&labelColor=161F21" alt="AusBoss">
+</p>
+
 ![Downloading a LoRA and a workflow from Civitai into ComfyUI](docs/demo.gif)
 
 There are two parts. A ComfyUI custom node does the downloading, and a Tampermonkey userscript adds the button to civitai.com. The node has no separate server and no settings file. It adds routes to the ComfyUI you already run and takes its folders from ComfyUI itself, so an `extra_model_paths.yaml` setup works without any extra configuration.
@@ -13,7 +19,23 @@ There are two parts. A ComfyUI custom node does the downloading, and a Tampermon
 - Each model gets a `.civitai.info` file and a preview image next to it. SD-WebUI Civitai Helper and ComfyUI Lora Manager read the same files.
 - Gallery images can be saved with their prompt and ComfyUI workflow.
 
-## Install
+## Quick start
+
+Clone the node into ComfyUI's `custom_nodes` folder, then run the quick start script with any Python 3.8 or later.
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/ausboss/ComfyUI-Civitai-Direct
+python ComfyUI-Civitai-Direct/quickstart.py
+```
+
+On Windows you can double-click `quickstart.bat` in the node's folder instead. It uses the Python that comes with portable and Easy-Install ComfyUI.
+
+The script finds your ComfyUI, asks for your Civitai API key (hidden as you type, and you can skip it), saves it to the node's `.env`, checks that ComfyUI has loaded the node, and opens the userscript install page. Run it again any time to change the key, or with `--check` to see whether everything is working. If you downloaded the repository somewhere else, run `python quickstart.py --comfyui <your ComfyUI folder>` from there and it installs the node for you.
+
+Nothing runs it automatically: ComfyUI and ComfyUI Manager never execute it, and it only writes inside your ComfyUI folder.
+
+## Install by hand
 
 **1. The node.** Clone it into your ComfyUI `custom_nodes` folder and restart ComfyUI.
 
@@ -141,7 +163,33 @@ The node asks `civitai.com` for the model, the version and, for gallery images, 
 
 **The userscript** runs only on Civitai pages. It sends the model and version ids to your ComfyUI, and asks Civitai's own API for the version's type and base model in order to label the button. It can connect only to `127.0.0.1` and `localhost` unless you set another address, and Tampermonkey asks before it allows that.
 
-**What runs.** One Python package that uses only what ComfyUI already ships (aiohttp), and one userscript. There are no compiled files, install scripts or pip installs, and both are short enough to read before you install them.
+**What runs.** One Python package that uses only what ComfyUI already ships (aiohttp), and one userscript. There are no compiled files or pip installs, and nothing runs at install time. `quickstart.py` is an optional helper that only runs when you start it, uses only Python's standard library, and is short enough to read first.
+
+## Setting this up for someone (for AI agents)
+
+Follow these steps in order. Each one has a check, so you know it worked before moving on.
+
+1. **Find ComfyUI.** It is the folder with `custom_nodes/` and either `main.py` (git, portable and Easy-Install setups) or `models/` (the ComfyUI desktop app, whose folder is `basePath` in `%APPDATA%\ComfyUI\config.json` on Windows or `~/Library/Application Support/ComfyUI/config.json` on macOS). If there is more than one, ask the person which one they use.
+2. **Install and configure.** Run the quick start without prompts. Pass the key through the environment so it never appears in a command line or a log:
+
+   ```bash
+   CIVITAI_API_KEY=<their key> python quickstart.py --comfyui <ComfyUI folder> --yes --key-from-env
+   ```
+
+   On Windows PowerShell, set `$env:CIVITAI_API_KEY` first. Without a key, leave out `--key-from-env`: public models still download. The script exits non-zero with a plain message if it cannot find ComfyUI or a command fails.
+3. **Restart ComfyUI.** The node loads only at startup. After that, keys and settings in `.env` are read on every download.
+4. **Check.** `python quickstart.py --check` exits 0 when a ComfyUI on port 8188, 8000 or 8189 (or `--port N`) has the node loaded, and prints where LoRAs and checkpoints will go and whether the key loaded. The same data is at `http://127.0.0.1:<port>/civitai/health`.
+5. **The userscript.** The person has to do this in their browser: install Tampermonkey, turn on Developer mode or "Allow User Scripts" in Chrome, and open the userscript link in [Install by hand](#install-by-hand). If ComfyUI is on another port or machine, they choose **Set ComfyUI address** in the Tampermonkey menu.
+6. **Optional test download.** Model 16014 is a small SD 1.5 LoRA that needs no key:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8188/civitai/download -H "Content-Type: application/json" -d '{"model_id":16014,"model_version_id":28907}'
+   curl "http://127.0.0.1:8188/civitai/status?id=1"
+   ```
+
+   It is done when the status says `done` and the file is in `loras/sd15/`. Delete it afterwards if they don't want it.
+
+Rules while you do it: never print, log or commit the API key, never edit `extra_model_paths.yaml` to make this work (the node already reads it), and don't change any setting the person didn't ask for. The settings are listed in [Settings](#settings).
 
 ## Development
 

@@ -4,6 +4,8 @@
 
 ### Added
 
+- `quickstart.py` (and `quickstart.bat` for Windows) sets everything up: it finds ComfyUI, installs the node, saves your API key to `.env`, checks that ComfyUI loaded the node and opens the userscript page. `--check` checks an existing setup, and `--yes --key-from-env` runs it without questions. The README has a step-by-step section for AI agents setting this up for someone.
+- The ready button uses the AusBoss slate-teal colors.
 - One userscript now covers everything: the model-page button, the model-card button and the gallery tools. Install `civitai-direct.user.js` and remove the two older scripts, which update to empty ones.
 - "Set ComfyUI address" in the Tampermonkey menu, for a ComfyUI on another port, another computer or a remote machine. The address survives script updates.
 - The userscript finds ComfyUI on ports 8188, 8000 (the desktop app) and 8189, and only counts a server that answers as this node.
